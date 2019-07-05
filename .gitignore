@@ -1,4 +1,4 @@
 # extensions
-.ipynb
+*.ipynb
 data/**
 logging/**
