@@ -1,0 +1,4 @@
+# extensions
+.ipynb
+data/**
+logging/**

@@ -1,0 +1,8 @@
+pip install keras
+pip install opencv-python
+pip install tqdm
+pip install pandas
+pip install pillow
+
+apt-get install libsm6 libxrender1 libfontconfig1
+apt update && apt install -y libsm6 libxext6
