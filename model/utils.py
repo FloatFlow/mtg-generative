@@ -6,10 +6,7 @@ import tensorflow as tf
 import os
 import pandas as pd
 import numpy as np
-from queue import Queue
-from multiprocessing import Pool
-import threading
-from threading import Lock
+from multiprocessing import Process, Queue, Lock, Value
 import time
 from functools import partial
 
@@ -77,11 +74,11 @@ def img_resize(img, y_dim, x_dim):
     if img.shape[0]*img.shape[1] < y_dim*x_dim:
         img = cv2.resize(img,
                          (y_dim, x_dim),
-                         interpolation=CV_INTER_CUBIC)
+                         interpolation=cv2.INTER_CUBIC)
     else:
         img = cv2.resize(img,
                          (y_dim, x_dim),
-                         interpolation=CV_INTER_AREA)
+                         interpolation=cv2.INTER_AREA)
     return img
 
 def crop_square_from_rec(img, img_dim=256):
@@ -94,7 +91,7 @@ def crop_square_from_rec(img, img_dim=256):
 
     # crop square from image
     smallest_axis = img.shape[:2].index(min(img.shape[:2]))
-    largest_axis = [axis for axis in [0, 1] if axis not smallest_axis][0]
+    largest_axis = [axis for axis in [0, 1] if axis != smallest_axis][0]
     largest_axis_len = img.shape[largest_axis]
     possible_crops = largest_axis_len-img_dim
     rand_position = np.random.randint(possible_crops)
@@ -106,27 +103,31 @@ def crop_square_from_rec(img, img_dim=256):
 
 def card_crop(img_path, img_dim=256):
     img = cv2.imread(img_path)
+    orig_shape = img.shape
     # resize if too small
     if (img.shape[0] < img_dim) or (img.shape[1] < img_dim):
-        img = crop_square_from_rec(img, img_dim)
+        img = crop_square_from_rec(img, img_dim=img_dim)
 
     # if image is too large
     else:
         random_method = np.random.randint(2)
         # resize so smallest axis = img_dim, then crop
         if random_method == 0:
-            img = crop_square_from_rec(img, img_dim)
+            img = crop_square_from_rec(img, img_dim=img_dim)
+        # take random crop from image
         else:
             smallest_axis_len = min(img.shape[:2])
-            percent = np.random.randint(80, 101)/10
+            percent = np.random.randint(80, 99)/100
             target_crop_size = int(smallest_axis_len*percent)
             x_positions = img.shape[0]-target_crop_size
             y_positions = img.shape[1]-target_crop_size
-            rand_x = np.random.randint(x_positions)
-            rand_y = np.random.randint(y_positions)
-            img = img[rand_x:rand_x+target_crop_size,
-                      rand_y:rand_y+target_crop_size,
-                      :]
+            if (x_positions != 0) and (y_positions != 0):
+                rand_x = np.random.randint(x_positions)
+                rand_y = np.random.randint(y_positions)
+                img = img[rand_x:rand_x+target_crop_size,
+                          rand_y:rand_y+target_crop_size,
+                          :]
+            img = img_resize(img, img_dim, img_dim)
 
     # randomly flip horizontally
     flip_val = np.random.randint(2)
@@ -137,7 +138,8 @@ def card_crop(img_path, img_dim=256):
     img = img[:,:,::-1]
     img = img/127.5
     img = img-1.0
-    return img.astype(np.float32)
+    img = np.array(img).astype(np.float32)
+    return img
 
 
 def label_generator(n_samples, seed):
@@ -145,6 +147,20 @@ def label_generator(n_samples, seed):
     random.seed(seed)
     random.shuffle(sample_list)
     return sample_list[:n_samples]
+
+def onehot_label_encoder(str_label):
+    # convert labels to one-hot encoded
+    lookup_dict = {'W':np.array([1,0,0,0,0]),
+                   'B':np.array([0,1,0,0,0]),
+                   'U':np.array([0,0,1,0,0]),
+                   'G':np.array([0,0,0,1,0]),
+                   'R':np.array([0,0,0,0,1])}
+
+    one_hot_label = np.zeros(shape=(5, ))
+    for k, v in lookup_dict.items():
+        if k in str_label:
+            one_hot_label += v
+    return one_hot_label
 
 ####################################################
 ## Data Generator
@@ -154,31 +170,23 @@ class CardGenerator():
     def __init__(self,
                  img_dir,
                  batch_size,
-                 n_threads, 
-                 n_cpu, 
-                 img_dim, 
-                 file_type = '.jpg'):
+                 n_cpu,
+                 img_dim,
+                 file_type='.jpg'):
         self.img_dir = img_dir
         self.img_dim = img_dim
         self.file_type = file_type
         self.batch_size = batch_size
-        self.file_type = file_type
-        self.n_threads = n_threads
         self.n_cpu = n_cpu
-        self.generate_data_paths()
-        self.queue = Queue(maxsize=4)
+        self.queue = Queue(maxsize=self.n_cpu*4)
         self.lock = Lock()
-        self.threads = []
         self.run = True
-        self.pools = [Pool(1) for _ in range(self.n_threads)]
-        self.counter = 0
-        self.queue_len = 0
+        self.counter = Value('i', 0)
+        self.generate_data_paths()
 
-        for i in range(self.n_threads):
-            self.threads.append(threading.Thread(target=self.multicpu_read,
-                                                 args=(self.pools[i], )))
-            self.threads[i].daemon = True
-            self.threads[i].start()   
+        for _ in range(self.n_cpu):
+             p = Process(target=self.fetch_batch)
+             p.start()
 
     def generate_data_paths(self):
         img_paths = []
@@ -188,62 +196,40 @@ class CardGenerator():
                 img_paths.append(os.path.join(self.img_dir, file))
                 label = os.path.basename(file).split('.')[0].split('_')[-1]
                 img_labels.append(label)
-        self.n_samples = len(img_paths)
 
-        # convert labels to one-hot encoded
-        lookup_dict = {'W':[1,0,0,0,0], 'B':[0,1,0,0,0], 'U':[0,0,1,0,0], 'G':[0,0,0,1,0], 'R':[0,0,0,0,1]}
-        one_hot_labels = []
-        for str_label in img_labels:
-            temp = [0,0,0,0,0]
-            for k, v in lookup_dict.items():
-                if k in str_label:
-                    temp = [sum(x) for x in zip(temp, v)]
-            one_hot_labels.append(temp)
+        # store paths and labels
+        self.df = pd.DataFrame({'paths':img_paths, 'labels':img_labels})
+        self.n_batches = (self.df.shape[0]//self.batch_size) - 1
+        self.indices = np.arange(self.n_batches)
 
-        # shuffle and batch
-        self.n_batches = self.n_samples//self.batch_size
-        self.n_samples = self.n_batches*self.batch_size
-        self.path_batches = [img_paths[i:i+self.batch_size] for i in range(0, self.n_samples, self.batch_size)]
-        self.label_batches = [one_hot_labels[i:i+self.batch_size] for i in range(0, self.n_samples, self.batch_size)]
-
-    def multicpu_read(self, pool):
+    def fetch_batch(self):
         while self.run:
 
             while self.queue.full():
                 time.sleep(0.1)
 
-            if self.queue.full() == False:
-                self.lock.acquire()
-                idx = self.counter
-                self.counter += 1
-                if self.counter >= self.n_batches:
-                    self.counter = 0
-                self.queue_len += 1
-                self.lock.release()
+            self.lock.acquire()
+            idx = self.counter.value
+            self.counter.value += 1
+            if self.counter.value >= self.n_batches:
+                self.counter.value = 0
+            self.lock.release()
 
-                numpy_batch = list(pool.imap(partial(card_crop, img_dim=self.img_dim),
-                                             [img_path for img_path in self.path_batches[idx]]))
-                label_batch = self.label_batches[idx]
+            positions = self.indices[idx*self.batch_size:(idx+1)*self.batch_size]
+            numpy_batch = np.array([card_crop(img_path, self.img_dim) for img_path in self.df['paths'].iloc[positions]])
+            label_batch = np.array([onehot_label_encoder(label) for label in self.df['labels'].iloc[positions]])
 
-                self.queue.put((numpy_batch, np.array(label_batch)))
+            if numpy_batch.shape == (self.batch_size, self.img_dim, self.img_dim, 3):
+                self.queue.put((numpy_batch, label_batch))
 
     def next(self):
-        while self.run:
-            while self.queue.empty():
-                time.sleep(0.1)
-            self.queue_len -= 1
-            return self.queue.get()
+        while self.queue.empty():
+            time.sleep(0.1)
+        return self.queue.get()
 
-    def shuffle(self, seed):
-        self.path_batches = [item for sublist in self.path_batches for item in sublist]
-        self.label_batches = [item for sublist in self.label_batches for item in sublist]
-        concat = list(zip(self.path_batches, self.label_batches))
-        random.shuffle(concat)
-        img_paths, one_hot_labels = zip(*concat)
-        self.path_batches = [img_paths[i:i+self.batch_size] for i in range(0, self.n_samples, self.batch_size)]
-        self.label_batches = [one_hot_labels[i:i+self.batch_size] for i in range(0, self.n_samples, self.batch_size)]
+    def shuffle(self):
+        self.df = self.df.sample(frac=1.0).reset_index(drop=True)
 
     def end(self):
         self.run = False
-        for thread in self.threads:
-            thread.end()
+        self.queue.close()
