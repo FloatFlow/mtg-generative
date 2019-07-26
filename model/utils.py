@@ -9,22 +9,44 @@ import numpy as np
 from multiprocessing import Process, Queue, Lock, Value
 import time
 from functools import partial
+import keras.backend as K
 
 ####################################################
 ## Loss functions
 ####################################################
 
-def real_discriminator_loss(true, pred):
+def hinge_real_discriminator_loss(true, pred):
     real_loss = tf.reduce_mean(tf.nn.relu(1.0 - pred))
     return real_loss
 
-def fake_discriminator_loss(true, pred):
+def hinge_fake_discriminator_loss(true, pred):
     fake_loss = tf.reduce_mean(tf.nn.relu(1.0 + pred))
     return fake_loss
 
-def generator_loss(true, pred):
+def hinge_generator_loss(true, pred):
     fake_loss = -tf.reduce_mean(pred)
     return fake_loss
+
+def nonsat_generator_loss(y_true, y_pred):
+    y_true = None
+    return K.mean(-K.log(K.sigmoid(y_pred)))
+
+def nonsat_discriminator_loss(y_true, y_pred):
+    y_true = None
+    nonsat_loss = -K.log(K.sigmoid(y_pred)) - K.log(K.sigmoid(1.0 - y_pred))
+    return K.mean(nonsat_loss)
+
+#r1/r2 gradient penalty
+def gradient_penalty_loss(y_true, y_pred, averaged_samples, weight=1):
+    y_true = None
+    gradients = K.gradients(y_pred, averaged_samples)[0]
+    gradients_sqr = K.square(gradients)
+    gradient_penalty = K.sum(gradients_sqr,
+                              axis=np.arange(1, len(gradients_sqr.shape)))
+    
+    # weight * ||grad||^2
+    # Penalize the gradient norm
+    return K.mean(gradient_penalty * weight)
 
 ####################################################
 ## Image Preprocessing and loading
@@ -215,12 +237,15 @@ class CardGenerator():
                 self.counter.value = 0
             self.lock.release()
 
-            positions = self.indices[idx*self.batch_size:(idx+1)*self.batch_size]
-            numpy_batch = np.array([card_crop(img_path, self.img_dim) for img_path in self.df['paths'].iloc[positions]])
-            label_batch = np.array([onehot_label_encoder(label) for label in self.df['labels'].iloc[positions]])
+            try:
+                positions = self.indices[idx*self.batch_size:(idx+1)*self.batch_size]
+                numpy_batch = np.array([card_crop(img_path, self.img_dim) for img_path in self.df['paths'].iloc[positions]])
+                label_batch = np.array([onehot_label_encoder(label) for label in self.df['labels'].iloc[positions]])
 
-            if numpy_batch.shape == (self.batch_size, self.img_dim, self.img_dim, 3):
-                self.queue.put((numpy_batch, label_batch))
+                if numpy_batch.shape == (self.batch_size, self.img_dim, self.img_dim, 3):
+                    self.queue.put((numpy_batch, label_batch))
+            except ValueError:
+                continue
 
     def next(self):
         while self.queue.empty():

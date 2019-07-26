@@ -3,7 +3,7 @@ from model.layers import *
 from model.network_blocks import *
 from keras.layers import BatchNormalization, Dense, Reshape, Lambda, Multiply, Add, Layer
 from keras.layers import Activation, UpSampling2D, AveragePooling2D, GlobalAveragePooling2D, Input
-from keras.layers import Concatenate, Embedding, Flatten
+from keras.layers import Concatenate, Embedding, Flatten, LeakyReLU
 from keras.models import Model
 from keras.optimizers import Adam
 import keras.backend as K
@@ -12,10 +12,10 @@ from tqdm import tqdm
 import cv2
 from PIL import Image
 from keras.utils import plot_model
+from functools import partial
 
 
-
-class miniGAN():
+class MiniGAN():
     def __init__(self, 
                  img_dim_x,
                  img_dim_y,
@@ -69,7 +69,7 @@ class miniGAN():
     1024    64
     2048    128
     '''
-    def build_deep_generator(self, ch=1024):
+    def build_generator(self, ch=1024):
         model_in = Input(shape=(self.z_len+self.n_classes,))
         x = Dense(4*4*ch)(model_in)
         x = Reshape((4,4,-1))(x)
@@ -99,7 +99,7 @@ class miniGAN():
         ch = ch//2
         x = deep_resblock_up(x, model_in, ch, upsample=True)
 
-        x = Activation('relu')(x)
+        x = LeakyReLU(0.01)(x)
         model_out = ConvSN2D(filters=3,
                              kernel_size=3,
                              strides=1,
@@ -112,7 +112,7 @@ class miniGAN():
         print(self.generator.summary())   
 
 
-    def build_deep_discriminator(self, ch=64):
+    def build_discriminator(self, ch=64):
         model_in = Input(shape=(self.img_dim_x, self.img_dim_y, self.img_depth))
         class_in = Input(shape=(self.n_classes,))
         x = ConvSN2D(filters=ch,
@@ -146,7 +146,7 @@ class miniGAN():
         x = deep_resblock_down(x, ch, downsample=True)
         x = deep_resblock_down(x, ch, downsample=False)
 
-        x = Activation('relu')(x)
+        x = LeakyReLU(0.01)(x)
         x = GlobalSumPooling2D()(x)
         #x = MinibatchDiscrimination(16, 16)(x)
 
@@ -168,10 +168,8 @@ class miniGAN():
         print(self.discriminator.summary())
 
     def build_model(self):
-        #d_optimizer = Adam(lr=self.d_lr, beta_1=0.0, beta_2=0.9)
-        #g_optimizer = Adam(lr=self.g_lr, beta_1=0.0, beta_2=0.9)
-        d_optimizer = Adam(lr=self.d_lr)
-        g_optimizer = Adam(lr=self.g_lr)
+        d_optimizer = Adam(lr=self.d_lr, beta_1=0.0, beta_2=0.9)
+        g_optimizer = Adam(lr=self.g_lr, beta_1=0.0, beta_2=0.9)
 
         # build complete discriminator
         fake_in = Input(shape=(self.img_dim_x, self.img_dim_y, self.img_depth))
@@ -197,10 +195,10 @@ class miniGAN():
         print(self.discriminator_model.summary())
         print(self.generator_model.summary())
 
-
     ###############################
     ## All our training, etc
-    ###############################
+    ###############################               
+
     def train(self, epochs):
 
         card_generator = CardGenerator(img_dir=self.training_dir,
