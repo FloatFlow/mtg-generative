@@ -12,6 +12,21 @@ from keras import constraints
 ## Other Layers
 ##########################
 
+class MiniBatchStd(Layer):
+    def __init__(self, **kwargs):
+        super(MiniBatchStd, self).__init__(**kwargs)
+
+    def build(self, input_shape):
+        super(MiniBatchStd, self).build(input_shape)
+
+    def call(self, inputs):
+        std = K.std(inputs, axis=-1, keepdims=True)
+        outputs = K.concatenate([inputs, std], axis=-1)
+        return outputs
+
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], input_shape[1], input_shape[2], input_shape[3]+1)
+
 #Input b and g should be 1x1xC
 class AdaInstanceNormalization(Layer):
     def __init__(self, 

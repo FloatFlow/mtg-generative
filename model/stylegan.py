@@ -131,7 +131,7 @@ class StyleGAN():
         x = style_discriminator_block(x, ch) #16x128
         x = style_discriminator_block(x, ch) #8x128
         x = style_discriminator_block(x, ch) #4x128
-
+        x = MiniBatchStd()(x)
         x = Conv2D(filters=ch,
                    kernel_size=4,
                    padding='valid',
