@@ -238,7 +238,8 @@ def style_discriminator_block(inputs,
                kernel_initializer=kernel_init)(inputs)
     x = LeakyReLU(0.2)(x)
     if downsample:
-        x = BilinearDownSampling2D()(x)
+        x = LowPassFilter2D()(x)
+        x = DestructiveSampling2D()(x)
     x = Conv2D(filters=output_dim,
                kernel_size=3,
                padding='same',

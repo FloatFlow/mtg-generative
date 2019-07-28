@@ -12,10 +12,25 @@ from keras import constraints
 ## Other Layers
 ##########################
 
-class BilinearDownSampling2D(Layer):
+class DestructiveSampling2D(Layer):
+    def __init__(self, skip_size=2, **kwargs):
+        self.skip_size = skip_size
+        super(DestructiveSampling2D, self).__init__(**kwargs)
+
+    def build(self, input_shape):
+        super(DestructiveSampling2D, self).build(input_shape)
+
+    def call(self, inputs):
+        return inputs[:, ::self.skip_size, ::self.skip_size, :]
+
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], input_shape[1]//self.skip_size, input_shape[1]//self.skip_size, input_shape[-1])
+
+
+class LowPassFilter2D(Layer):
     def __init__(self, kernel_size=3, **kwargs):
         self.kernel_size = kernel_size
-        super(BilinearDownSampling2D, self).__init__(**kwargs)
+        super(LowPassFilter2D, self).__init__(**kwargs)
 
     def build(self, input_shape):
         if self.kernel_size == 2:
@@ -32,9 +47,17 @@ class BilinearDownSampling2D(Layer):
                             [1, 1, 1, 1]]
             numpy_kernel = numpy_kernel/np.sum(numpy_kernel)
             self.kernel = K.constant(numpy_kernel)
+        elif serlf.kernel_size == 5:
+            numpy_kernel = [[1, 1, 1, 1, 1],
+                            [1, 4, 4, 4, 1],
+                            [1, 4, 6, 4, 1],
+                            [1, 4, 4, 4, 1],
+                            [1, 1, 1, 1, 1]]
+            numpy_kernel = numpy_kernel/np.sum(numpy_kernel)
+            self.kernel = K.constant(numpy_kernel)
         else:
-            raise ValueError('BilinearDownSampling2D only implements kernel sizes of 2, 3, or 4.')
-        super(BilinearDownSampling2D, self).build(input_shape)
+            raise ValueError('LowPassFilter2D only implements kernel sizes of 2, 3, 4, or 5.')
+        super(LowPassFilter2D, self).build(input_shape)
 
     def call(self, inputs):
         n_channels = K.int_shape(inputs)[-1]
@@ -47,11 +70,10 @@ class BilinearDownSampling2D(Layer):
                                        padding='same',
                                        data_format='channels_last',
                                        dilation_rate=(1, 1))
-        subsampled = convolved[:, ::2, ::2, :]
-        return subsampled
+        return convolved
 
     def compute_output_shape(self, input_shape):
-        return (input_shape[0], input_shape[1]//2, input_shape[1]//2, input_shape[-1])
+        return input_shape
 
 class LearnedConstantLatent(Layer):
     def __init__(self, **kwargs):

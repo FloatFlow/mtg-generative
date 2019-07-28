@@ -255,7 +255,7 @@ class StyleGAN():
         print('Generating Images...')
         if not os.path.isdir(self.validation_dir):
             os.mkdir(self.validation_dir)
-        latent = np.ones(self.noise_samples.shape[0], self.z_len)
+        latent = np.ones(shape=(self.noise_samples.shape[0], self.z_len))
         noise = np.random.normal(0, 1, size=(self.noise_samples.shape[0],
                                              self.img_dim_x,
                                              self.img_dim_y,
