@@ -12,6 +12,66 @@ from keras import constraints
 ## Other Layers
 ##########################
 
+class BilinearDownSampling2D(Layer):
+    def __init__(self, kernel_size=3, **kwargs):
+        self.kernel_size = kernel_size
+        super(BilinearDownSampling2D, self).__init__(**kwargs)
+
+    def build(self, input_shape):
+        if self.kernel_size == 2:
+            self.kernel = K.constant([[0.25, 0.25,],
+                                      [0.25, 0.25,]])
+        elif self.kernel_size == 3:
+            self.kernel = K.constant([[0.1, 0.1, 0.1],
+                                      [0.1, 0.2, 0.1],
+                                      [0.1, 0.1, 0.1]])
+        elif self.kernel_size == 4:
+            numpy_kernel = [[1, 1, 1, 1],
+                            [1, 3, 3, 1],
+                            [1, 3, 3, 1],
+                            [1, 1, 1, 1]]
+            numpy_kernel = numpy_kernel/np.sum(numpy_kernel)
+            self.kernel = K.constant(numpy_kernel)
+        else:
+            raise ValueError('BilinearDownSampling2D only implements kernel sizes of 2, 3, or 4.')
+        super(BilinearDownSampling2D, self).build(input_shape)
+
+    def call(self, inputs):
+        n_channels = K.int_shape(inputs)[-1]
+        kernel = K.expand_dims(self.kernel, axis=-1)
+        kernel = K.expand_dims(kernel, axis=-1)
+        kernel = K.tile(kernel, (1, 1, n_channels, 1))
+        convolved = K.depthwise_conv2d(inputs,
+                                       kernel,
+                                       strides=(1, 1),
+                                       padding='same',
+                                       data_format='channels_last',
+                                       dilation_rate=(1, 1))
+        subsampled = convolved[:, ::2, ::2, :]
+        return subsampled
+
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], input_shape[1]//2, input_shape[1]//2, input_shape[-1])
+
+class LearnedConstantLatent(Layer):
+    def __init__(self, **kwargs):
+        self.latent = None
+        super(LearnedConstantLatent, self).__init__(**kwargs)
+
+    def build(self, input_shape):
+        self.latent = self.add_weight(shape=(input_shape[-1], ),
+                                      name='learned_latent',
+                                      initializer='ones')
+        super(LearnedConstantLatent, self).build(input_shape)
+
+    def call(self, inputs):
+        latent = K.expand_dims(self.latent, axis=0)
+        latent_expand = K.tile(latent, [K.shape(inputs)[0], 1])
+        return latent_expand
+
+    def compute_output_shape(self, input_shape):
+        return input_shape
+
 class MiniBatchStd(Layer):
     def __init__(self, **kwargs):
         super(MiniBatchStd, self).__init__(**kwargs)

@@ -32,6 +32,7 @@ class StyleGAN():
                  testing_dir,
                  n_cpu,
                  n_noise_samples=16):
+        self.name = 'stylegan'
         self.img_dim_x = img_dim_x
         self.img_dim_y = img_dim_y
         self.img_depth = img_depth
@@ -78,8 +79,9 @@ class StyleGAN():
 
         noise_in = Input(shape=(self.img_dim_x, self.img_dim_y, 1))
 
-        latent_in = Input(shape=(1, ))
-        x = Dense(4*4*ch)(latent_in)
+        latent_in = Input(shape=(self.z_len, ))
+        x = LearnedConstantLatent()(latent_in)
+        x = Dense(4*4*ch)(x)
         x = Reshape((4, 4, -1))(x)
 
         x = Conv2D(filters=ch,
@@ -104,7 +106,9 @@ class StyleGAN():
         model_out = Activation('tanh')(x)
 
         self.generator = Model([style_in, latent_in, noise_in], model_out)   
-        print(self.generator.summary())   
+        print(self.generator.summary())
+        with open('{}_architecture.txt'.format(self.name), 'w') as f:
+            self.generator.summary(print_fn=lambda x: f.write(x + '\n'))
 
 
     def build_discriminator(self, ch=16, kernel_init='he_normal'):
@@ -153,6 +157,8 @@ class StyleGAN():
         self.frozen_discriminator = Network([img_in, class_in], model_out)
 
         print(self.discriminator.summary())
+        with open('{}_architecture.txt'.format(self.name), 'a') as f:
+            self.discriminator.summary(print_fn=lambda x: f.write(x + '\n'))
 
     def build_model(self):
         d_optimizer = Adam(lr=self.d_lr, beta_1=0.0, beta_2=0.9)
@@ -167,8 +173,8 @@ class StyleGAN():
 
         self.discriminator_model = Model([real_in, fake_in, class_in], [real_label, fake_label, real_label])
         self.discriminator_model.compile(d_optimizer,
-                                         loss=['binary_crossentropy',
-                                               'binary_crossentropy',
+                                         loss=[hinge_real_discriminator_loss,
+                                               hinge_fake_discriminator_loss,
                                                partial(gradient_penalty_loss, averaged_samples=real_in)],
                                          loss_weights=[1, 1, 10])
 
@@ -176,14 +182,14 @@ class StyleGAN():
 
         # build generator model
         style_in = Input(shape=(self.z_len+self.n_classes,))
-        latent_in = Input(shape=(1, ))
+        latent_in = Input(shape=(self.z_len, ))
         noise_in = Input(shape=(self.img_dim_x, self.img_dim_y, 1))
         class_in = Input(shape=(self.n_classes,))
         fake_img = self.generator([style_in, latent_in, noise_in])
         frozen_fake_label = self.frozen_discriminator([fake_img, class_in])
 
         self.generator_model = Model([style_in, latent_in, noise_in, class_in], frozen_fake_label)
-        self.generator_model.compile(g_optimizer, 'binary_crossentropy')
+        self.generator_model.compile(g_optimizer, hinge_generator_loss)
         
         print(self.discriminator_model.summary())
         print(self.generator_model.summary())
@@ -210,19 +216,20 @@ class StyleGAN():
                 style = np.random.normal(0, 1, size=(self.batch_size, self.z_len))
                 style_labels = np.concatenate([style, real_labels], axis=1)
                 noise = np.random.normal(0, 1, size=(self.batch_size, self.img_dim_x, self.img_dim_y, 1))
+                dummy_latent = np.ones(shape=(self.batch_size, self.z_len))
                 dummy = np.ones(shape=(self.batch_size, ))
                 ones = np.ones(shape=(self.batch_size, ))
                 zeros = np.zeros(shape=(self.batch_size, ))
                 neg_ones = -ones
 
-                fake_batch = self.generator.predict([style_labels, ones, noise])
+                fake_batch = self.generator.predict([style_labels, dummy_latent, noise])
                 
                 d_loss = self.discriminator_model.train_on_batch([real_batch, fake_batch, real_labels],
-                                                                 [ones, zeros, dummy])
+                                                                 [ones, neg_ones, dummy])
                 d_loss = sum(d_loss)
                 d_loss_accum.append(d_loss)
             
-                g_loss = self.generator_model.train_on_batch([style_labels, ones, noise, real_labels], zeros)
+                g_loss = self.generator_model.train_on_batch([style_labels, dummy_latent, noise, real_labels], zeros)
                 g_loss_accum.append(g_loss)
                 
 
@@ -248,7 +255,7 @@ class StyleGAN():
         print('Generating Images...')
         if not os.path.isdir(self.validation_dir):
             os.mkdir(self.validation_dir)
-        latent = np.ones(self.noise_samples.shape[0])
+        latent = np.ones(self.noise_samples.shape[0], self.z_len)
         noise = np.random.normal(0, 1, size=(self.noise_samples.shape[0],
                                              self.img_dim_x,
                                              self.img_dim_y,

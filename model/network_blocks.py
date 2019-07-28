@@ -238,10 +238,10 @@ def style_discriminator_block(inputs,
                kernel_initializer=kernel_init)(inputs)
     x = LeakyReLU(0.2)(x)
     if downsample:
-        x = AveragePooling2D()(x)
+        x = BilinearDownSampling2D()(x)
     x = Conv2D(filters=output_dim,
                kernel_size=3,
                padding='same',
-               kernel_initializer=kernel_init)(inputs)
+               kernel_initializer=kernel_init)(x)
     x = LeakyReLU(0.2)(x)
     return x

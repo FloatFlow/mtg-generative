@@ -27,15 +27,6 @@ def hinge_generator_loss(true, pred):
     fake_loss = -tf.reduce_mean(pred)
     return fake_loss
 
-def nonsat_generator_loss(y_true, y_pred):
-    y_true = None
-    return K.mean(-K.log(K.sigmoid(y_pred)))
-
-def nonsat_discriminator_loss(y_true, y_pred):
-    y_true = None
-    nonsat_loss = -K.log(K.sigmoid(y_pred)) - K.log(K.sigmoid(1.0 - y_pred))
-    return K.mean(nonsat_loss)
-
 #r1/r2 gradient penalty
 def gradient_penalty_loss(y_true, y_pred, averaged_samples, weight=1):
     y_true = None

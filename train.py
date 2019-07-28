@@ -61,16 +61,16 @@ def parse_args():
                         default=5)
     parser.add_argument('--g_lr',
                         type=float,
-                        default=4e-4)
+                        default=2e-4)
     parser.add_argument('--d_lr',
                         type=float,
-                        default=5e-5)
+                        default=1e-4)
     parser.add_argument('--save_freq',
                         type=int,
-                        default=5)
+                        default=2)
     parser.add_argument('--batch_size',
                         type=int,
-                        default=8)
+                        default=16)
 
     return parser.parse_args()
 
