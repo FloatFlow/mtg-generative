@@ -6,6 +6,7 @@ from keras.layers import Activation, UpSampling2D, AveragePooling2D, GlobalAvera
 from keras.layers import Concatenate, Embedding, Flatten, LeakyReLU
 from keras.models import Model
 from keras.optimizers import Adam
+from keras.initializers import RandomNormal
 import keras.backend as K
 from keras.engine.network import Network
 from tqdm import tqdm
@@ -57,7 +58,7 @@ class StyleGAN():
         self.noise_samples = np.concatenate([np.random.normal(0, 0.8, size=(self.n_noise_samples, self.z_len)), \
                                             label_generator(self.n_noise_samples, seed=42)], axis=1)
 
-        self.kernel_init = 'he_normal'
+        self.kernel_init = RandomNormal(0, 1)
 
 
     ###############################
@@ -70,39 +71,39 @@ class StyleGAN():
     1024    64
     2048    128
     '''
-    def build_generator(self, ch=128, kernel_init='he_normal'):
+    def build_generator(self, ch=128):
         style_in = Input(shape=(self.z_len+self.n_classes, ))
-        style = Dense(self.z_len)(style_in)
+        style = Dense(self.z_len, kernel_initializer=self.kernel_init)(style_in)
         style = LeakyReLU(0.2)(style)
-        style = Dense(self.z_len)(style)
+        style = Dense(self.z_len, kernel_initializer=self.kernel_init)(style)
         style = LeakyReLU(0.2)(style)
 
         noise_in = Input(shape=(self.img_dim_x, self.img_dim_y, 1))
 
         latent_in = Input(shape=(self.z_len, ))
         x = LearnedConstantLatent()(latent_in)
-        x = Dense(4*4*ch)(x)
+        x = Dense(4*4*ch, kernel_initializer=self.kernel_init)(x)
         x = Reshape((4, 4, -1))(x)
 
         x = Conv2D(filters=ch,
                    kernel_size=4,
                    padding='same',
-                   kernel_initializer=kernel_init)(x)
+                   kernel_initializer=self.kernel_init)(x)
         x = LeakyReLU(0.2)(x)
-        x = style_generator_block(x, style, noise_in, ch) #8x128
-        x = style_generator_block(x, style, noise_in, ch) #16x128
-        x = style_generator_block(x, style, noise_in, ch) #32x128
+        x = style_generator_block(x, style, noise_in, ch, kernel_init=self.kernel_init) #8x128
+        x = style_generator_block(x, style, noise_in, ch, kernel_init=self.kernel_init) #16x128
+        x = style_generator_block(x, style, noise_in, ch, kernel_init=self.kernel_init) #32x128
         ch = ch // 2
-        x = style_generator_block(x, style, noise_in, ch) #64x64
+        x = style_generator_block(x, style, noise_in, ch, kernel_init=self.kernel_init) #64x64
         ch = ch // 2
-        x = style_generator_block(x, style, noise_in, ch) #128x32
+        x = style_generator_block(x, style, noise_in, ch, kernel_init=self.kernel_init) #128x32
         ch = ch // 2
-        x = style_generator_block(x, style, noise_in, ch) #256x16
+        x = style_generator_block(x, style, noise_in, ch, kernel_init=self.kernel_init) #256x16
 
         x = Conv2D(filters=3,
                    kernel_size=1,
                    padding='same',
-                   kernel_initializer=kernel_init)(x)
+                   kernel_initializer=self.kernel_init)(x)
         model_out = Activation('tanh')(x)
 
         self.generator = Model([style_in, latent_in, noise_in], model_out)   
@@ -118,34 +119,34 @@ class StyleGAN():
         x = Conv2D(filters=ch,
                    kernel_size=1,
                    padding='same',
-                   kernel_initializer=kernel_init)(img_in)
+                   kernel_initializer=self.kernel_init)(img_in)
         x = LeakyReLU(0.2)(x)
         x = Conv2D(filters=ch,
                    kernel_size=3,
                    padding='same',
-                   kernel_initializer=kernel_init)(x)
+                   kernel_initializer=self.kernel_init)(x)
         x = LeakyReLU(0.2)(x)
 
         ch *= 2
-        x = style_discriminator_block(x, ch) #128x32
+        x = style_discriminator_block(x, ch, kernel_init=self.kernel_init) #128x32
         ch *= 2
-        x = style_discriminator_block(x, ch) #64x64
+        x = style_discriminator_block(x, ch, kernel_init=self.kernel_init) #64x64
         ch *= 2
-        x = style_discriminator_block(x, ch) #32x128
-        x = style_discriminator_block(x, ch) #16x128
-        x = style_discriminator_block(x, ch) #8x128
-        x = style_discriminator_block(x, ch) #4x128
+        x = style_discriminator_block(x, ch, kernel_init=self.kernel_init) #32x128
+        x = style_discriminator_block(x, ch, kernel_init=self.kernel_init) #16x128
+        x = style_discriminator_block(x, ch, kernel_init=self.kernel_init) #8x128
+        x = style_discriminator_block(x, ch, kernel_init=self.kernel_init) #4x128
         x = MiniBatchStd()(x)
         x = Conv2D(filters=ch,
                    kernel_size=4,
                    padding='valid',
-                   kernel_initializer=kernel_init)(x)
+                   kernel_initializer=self.kernel_init)(x)
         x = LeakyReLU(0.2)(x)
         x = GlobalAveragePooling2D()(x)
 
         # architecture of tail stem
-        out = Dense(1)(x)
-        y = Dense(1)(class_in)
+        out = Dense(1, kernel_initializer=self.kernel_init)(x)
+        y = Dense(1, kernel_initializer=self.kernel_init)(class_in)
 
         target_dim = x.shape[-1]
         y = Lambda(lambda x: K.tile(x, (1, target_dim)))(y)

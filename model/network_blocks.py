@@ -1,14 +1,17 @@
 from keras.layers import BatchNormalization, Dense, Reshape, Lambda, Multiply, Add, Layer
 from keras.layers import Activation, UpSampling2D, AveragePooling2D, GlobalAveragePooling2D, Input
 from keras.layers import Concatenate, Embedding, Flatten, LeakyReLU, Cropping2D
+from keras.initializers import RandomNormal
 from model.layers import *
+
 
 def adainstancenorm_zproj(x, z, kernel_init='he_normal'):
     # note bigGAN init gamma and beta kernels as N(0, 0.02)
     target_shape = K.int_shape(x)
     gamma = Dense(target_shape[-1],
                   use_bias=True,
-                  kernel_initializer='ones')(z)
+                  kernel_initializer=kernel_init,
+                  bias_initializer='ones')(z)
     gamma = Reshape((1, 1, -1))(gamma)
     beta = Dense(target_shape[-1],
                   use_bias=True,
@@ -137,7 +140,8 @@ def style_generator_block_alt(inputs,
                           noise,
                           output_dim,
                           upsample=True,
-                          kernel_init='he_normal'):
+                          kernel_init='he_normal',
+                          noise_init='zeros'):
     if upsample:
         input_shape = K.int_shape(inputs)[1]*2
     else:
@@ -148,7 +152,7 @@ def style_generator_block_alt(inputs,
     fuzz = Conv2D(filters=output_dim,
                   kernel_size=1,
                   padding='same',
-                  kernel_initializer=kernel_init)(fuzz)
+                  kernel_initializer=zeros)(fuzz)
 
     if upsample:
         x = UpSampling2D(interpolation='bilinear')(inputs)
@@ -167,7 +171,7 @@ def style_generator_block_alt(inputs,
     fuzz = Conv2D(filters=output_dim,
                   kernel_size=1,
                   padding='same',
-                  kernel_initializer=kernel_init)(fuzz)
+                  kernel_initializer=zeros)(fuzz)
 
     x = Conv2D(filters=output_dim,
                kernel_size=3,
@@ -185,7 +189,8 @@ def style_generator_block(inputs,
                           noise,
                           output_dim,
                           upsample=True,
-                          kernel_init='he_normal'):
+                          kernel_init='he_normal',
+                          noise_init='zeros'):
     if upsample:
         input_shape = K.int_shape(inputs)[1]*2
     else:
@@ -203,12 +208,12 @@ def style_generator_block(inputs,
     fuzz = Conv2D(filters=output_dim,
                   kernel_size=1,
                   padding='same',
-                  kernel_initializer=kernel_init)(fuzz)
+                  kernel_initializer=noise_init)(fuzz)
     x = Conv2D(filters=output_dim,
                kernel_size=3,
                padding='same',
                kernel_initializer=kernel_init)(x)
-    x = adainstancenorm_zproj(x, style)
+    x = adainstancenorm_zproj(x, style, kernel_init=kernel_init)
     x = Add()([x, fuzz])
     x = LeakyReLU(0.2)(x)
 
@@ -217,12 +222,12 @@ def style_generator_block(inputs,
     fuzz = Conv2D(filters=output_dim,
                   kernel_size=1,
                   padding='same',
-                  kernel_initializer=kernel_init)(fuzz)
+                  kernel_initializer=noise_init)(fuzz)
     x = Conv2D(filters=output_dim,
                kernel_size=3,
                padding='same',
                kernel_initializer=kernel_init)(x)
-    x = adainstancenorm_zproj(x, style)
+    x = adainstancenorm_zproj(x, style, kernel_init=kernel_init)
     x = Add()([x, fuzz])
     x = LeakyReLU(0.2)(x)
 
