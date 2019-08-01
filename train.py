@@ -17,7 +17,7 @@ def parse_args():
                         default=True)
     parser.add_argument('--training_dir',
                         type=str,
-                        default='data/images')
+                        default='data/mtg_images')
     parser.add_argument('--validation_dir',
                         type=str,
                         default='logging/validation_images')

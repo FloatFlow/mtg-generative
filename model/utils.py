@@ -15,17 +15,32 @@ import keras.backend as K
 ## Loss functions
 ####################################################
 
-def hinge_real_discriminator_loss(true, pred):
-    real_loss = tf.reduce_mean(tf.nn.relu(1.0 - pred))
+def hinge_real_discriminator_loss(y_true, y_pred):
+    real_loss = tf.reduce_mean(tf.nn.relu(1.0 - y_pred))
     return real_loss
 
-def hinge_fake_discriminator_loss(true, pred):
-    fake_loss = tf.reduce_mean(tf.nn.relu(1.0 + pred))
+def hinge_fake_discriminator_loss(y_true, y_pred):
+    fake_loss = tf.reduce_mean(tf.nn.relu(1.0 + y_pred))
     return fake_loss
 
-def hinge_generator_loss(true, pred):
-    fake_loss = -tf.reduce_mean(pred)
+def hinge_generator_loss(y_true, y_pred):
+    fake_loss = -tf.reduce_mean(y_pred)
     return fake_loss
+
+def wgan_loss(y_true, y_pred):
+    return K.mean(y_true*y_pred)
+
+def nonsat_fake_discriminator_loss(y_true, y_pred):
+    """nonsaturating wgan loss only has fake critic loss"""
+    first_term = -K.log(K.sigmoid(y_pred))
+    second_term = K.log(K.sigmoid(1.0-y_pred))
+    return K.mean(first_term - second_term)
+
+def nonsat_real_discriminator_loss(y_true, y_pred):
+    return K.constant(0)
+
+def nonsat_generator_loss(y_true, y_pred):
+    return K.mean(-K.log(K.sigmoid(y_pred)))
 
 #r1/r2 gradient penalty
 def gradient_penalty_loss(y_true, y_pred, averaged_samples, weight=1):

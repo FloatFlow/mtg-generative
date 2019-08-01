@@ -2,3 +2,6 @@
 *.ipynb
 data/**
 logging/**
+filter_comparisons/**
+.ipynb_checkpoints/**
+testing_data/**

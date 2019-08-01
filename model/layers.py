@@ -1,4 +1,5 @@
 # imports
+import numpy as np
 from keras.layers import Layer, Dense, Conv2D, Conv2DTranspose, Embedding, InputSpec, Conv1D, Conv3D
 import keras.backend as K
 #from keras.models import 
@@ -7,10 +8,77 @@ from keras import initializers
 from keras import regularizers
 from keras import constraints
 
+class EqualizedDense(Dense):
+    def __init__(self, lr_mul=1, **kwargs):
+        self.lr_mul = K.constant(lr_mul)
+        super(EqualizedDense, self).__init__(**kwargs)
 
-##########################
-## Other Layers
-##########################
+    def build(self, input_shape):
+        super(EqualizedDense, self).build(input_shape)
+        
+
+    def call(self, inputs):
+        fan_in = K.eval(K.prod(K.shape(self.kernel)))
+        he_std = K.sqrt(K.constant(2.0))/K.sqrt(K.constant(fan_in))
+        kernel = self.kernel * he_std * self.lr_mul
+        outputs = K.dot(inputs, kernel)
+        outputs = K.bias_add(
+                outputs,
+                self.bias)
+        return outputs
+
+class EqualizedConv2D(Conv2D):
+    def __init__(self, **kwargs):
+        super(EqualizedConv2D, self).__init__(**kwargs)
+
+    def build(self, input_shape):
+        super(EqualizedConv2D, self).build(input_shape)
+
+    def call(self, inputs):
+        fan_in = K.eval(K.prod(K.shape(self.kernel)))
+        he_std = K.sqrt(K.constant(2.0))/K.sqrt(K.constant(fan_in))
+        kernel = self.kernel * he_std
+        outputs = K.conv2d(
+                inputs,
+                kernel,
+                strides=self.strides,
+                padding=self.padding,
+                data_format=self.data_format,
+                dilation_rate=self.dilation_rate)
+        outputs = K.bias_add(
+                outputs,
+                self.bias,
+                data_format=self.data_format)
+        return outputs
+
+class EqualizedConv2DTranspose(Conv2DTranspose):
+    def __init__(self, **kwargs):
+        super(EqualizedConv2DTranspose, self).__init__(**kwargs)
+
+    def build(self, input_shape):
+        super(EqualizedConv2DTranspose, self).build(input_shape)
+        
+
+    def call(self, inputs):
+        fan_in = K.eval(K.prod(K.shape(self.kernel)))
+        he_std = K.sqrt(K.constant(2.0))/K.sqrt(K.constant(fan_in))
+        kernel = self.kernel * he_std
+        input_shape = K.shape(inputs)
+        output_shape = (input_shape[0], input_shape[1]*2, input_shape[2]*2, self.filters)
+        outputs = K.conv2d_transpose(
+            inputs,
+            kernel,
+            output_shape,
+            self.strides,
+            padding=self.padding,
+            data_format=self.data_format,
+            dilation_rate=self.dilation_rate)
+        outputs = K.bias_add(
+                outputs,
+                self.bias,
+                data_format=self.data_format)
+        return outputs
+
 
 class DestructiveSampling2D(Layer):
     def __init__(self, skip_size=2, **kwargs):
@@ -87,7 +155,8 @@ class LearnedConstantLatent(Layer):
         super(LearnedConstantLatent, self).build(input_shape)
 
     def call(self, inputs):
-        latent = K.expand_dims(self.latent, axis=0)
+        latent = self.latent * (K.constant(1.0)/ K.sqrt(K.mean(K.square(self.latent), axis=-1, keepdims=True) + K.epsilon()))
+        latent = K.expand_dims(latent, axis=0)
         latent_expand = K.tile(latent, [K.shape(inputs)[0], 1])
         return latent_expand
 
@@ -95,19 +164,39 @@ class LearnedConstantLatent(Layer):
         return input_shape
 
 class MiniBatchStd(Layer):
-    def __init__(self, **kwargs):
+    def __init__(self, group_size=4, n_new_features=1, **kwargs):
+        self.group_size = group_size
+        self.n_new_features = n_new_features
         super(MiniBatchStd, self).__init__(**kwargs)
 
     def build(self, input_shape):
         super(MiniBatchStd, self).build(input_shape)
 
     def call(self, inputs):
-        std = K.std(inputs, axis=-1, keepdims=True)
-        outputs = K.concatenate([inputs, std], axis=-1)
+        '''
+        group_size = K.minimum(self.group_size, K.shape(inputs)[0])
+        y = K.permute_dimensions(inputs, (0, 3, 1, 2))
+        input_shape = K.shape(y)
+        y = K.reshape(y, [group_size,
+                          -1,
+                          self.n_new_features,
+                          input_shape[1]//self.n_new_features,
+                          input_shape[2],
+                          input_shape[3]])
+        y -= K.mean(y, axis=0, keepdims=True)
+        y = K.mean(K.square(y), axis=0)
+        y = K.sqrt(y + K.epsilon())
+        y = K.mean(y, axis=[2, 3, 4], keepdims=True)
+        y = K.mean(y, axis=2)
+        y = K.tile(y, [group_size, 1, input_shape[2], input_shape[3]])
+        y = K.permute_dimensions(y, (0, 2, 3, 1))
+        '''
+        y = K.std(inputs, axis=-1, keepdims=True)
+        outputs = K.concatenate([inputs, y], axis=-1)
         return outputs
 
     def compute_output_shape(self, input_shape):
-        return (input_shape[0], input_shape[1], input_shape[2], input_shape[3]+1)
+        return (input_shape[0], input_shape[1], input_shape[2], input_shape[3]+self.n_new_features)
 
 #Input b and g should be 1x1xC
 class AdaInstanceNormalization(Layer):
