@@ -61,7 +61,7 @@ def parse_args():
                         default=5)
     parser.add_argument('--g_lr',
                         type=float,
-                        default=2e-4)
+                        default=1e-4)
     parser.add_argument('--d_lr',
                         type=float,
                         default=1e-4)

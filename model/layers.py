@@ -8,77 +8,21 @@ from keras import initializers
 from keras import regularizers
 from keras import constraints
 
-class EqualizedDense(Dense):
-    def __init__(self, lr_mul=1, **kwargs):
-        self.lr_mul = K.constant(lr_mul)
-        super(EqualizedDense, self).__init__(**kwargs)
-
-    def build(self, input_shape):
-        super(EqualizedDense, self).build(input_shape)
-        
-
-    def call(self, inputs):
-        fan_in = K.eval(K.prod(K.shape(self.kernel)))
-        he_std = K.sqrt(K.constant(2.0))/K.sqrt(K.constant(fan_in))
-        kernel = self.kernel * he_std * self.lr_mul
-        outputs = K.dot(inputs, kernel)
-        outputs = K.bias_add(
-                outputs,
-                self.bias)
-        return outputs
-
-class EqualizedConv2D(Conv2D):
+class NoiseLayer(Layer):
     def __init__(self, **kwargs):
-        super(EqualizedConv2D, self).__init__(**kwargs)
+        super(NoiseLayer, self).__init__(**kwargs)
 
     def build(self, input_shape):
-        super(EqualizedConv2D, self).build(input_shape)
+        self.noise_weight = self.add_weight('noise_weight',
+                                            shape=[input_shape[-1]],
+                                            initializer='zeros')
 
-    def call(self, inputs):
-        fan_in = K.eval(K.prod(K.shape(self.kernel)))
-        he_std = K.sqrt(K.constant(2.0))/K.sqrt(K.constant(fan_in))
-        kernel = self.kernel * he_std
-        outputs = K.conv2d(
-                inputs,
-                kernel,
-                strides=self.strides,
-                padding=self.padding,
-                data_format=self.data_format,
-                dilation_rate=self.dilation_rate)
-        outputs = K.bias_add(
-                outputs,
-                self.bias,
-                data_format=self.data_format)
-        return outputs
+    def call(self, x, **kwargs):
+        noise = K.random_normal([K.shape(x)[0], K.shape(x)[1], K.shape(x)[2], 1], dtype=x.dtype)  # [batch, h, w, c]
+        return x + noise * K.reshape(self.noise_weight, [1, 1, 1, -1])
 
-class EqualizedConv2DTranspose(Conv2DTranspose):
-    def __init__(self, **kwargs):
-        super(EqualizedConv2DTranspose, self).__init__(**kwargs)
-
-    def build(self, input_shape):
-        super(EqualizedConv2DTranspose, self).build(input_shape)
-        
-
-    def call(self, inputs):
-        fan_in = K.eval(K.prod(K.shape(self.kernel)))
-        he_std = K.sqrt(K.constant(2.0))/K.sqrt(K.constant(fan_in))
-        kernel = self.kernel * he_std
-        input_shape = K.shape(inputs)
-        output_shape = (input_shape[0], input_shape[1]*2, input_shape[2]*2, self.filters)
-        outputs = K.conv2d_transpose(
-            inputs,
-            kernel,
-            output_shape,
-            self.strides,
-            padding=self.padding,
-            data_format=self.data_format,
-            dilation_rate=self.dilation_rate)
-        outputs = K.bias_add(
-                outputs,
-                self.bias,
-                data_format=self.data_format)
-        return outputs
-
+    def compute_output_shape(self, input_shape):
+        return input_shape
 
 class DestructiveSampling2D(Layer):
     def __init__(self, skip_size=2, **kwargs):
@@ -173,7 +117,7 @@ class MiniBatchStd(Layer):
         super(MiniBatchStd, self).build(input_shape)
 
     def call(self, inputs):
-        '''
+        
         group_size = K.minimum(self.group_size, K.shape(inputs)[0])
         y = K.permute_dimensions(inputs, (0, 3, 1, 2))
         input_shape = K.shape(y)
@@ -190,8 +134,8 @@ class MiniBatchStd(Layer):
         y = K.mean(y, axis=2)
         y = K.tile(y, [group_size, 1, input_shape[2], input_shape[3]])
         y = K.permute_dimensions(y, (0, 2, 3, 1))
-        '''
-        y = K.std(inputs, axis=-1, keepdims=True)
+        
+        #y = K.std(inputs, axis=-1, keepdims=True)
         outputs = K.concatenate([inputs, y], axis=-1)
         return outputs
 
@@ -228,7 +172,7 @@ class AdaInstanceNormalization(Layer):
     
     def call(self, inputs, training=None):
         input_shape = K.int_shape(inputs[0])
-        reduction_axes = list(range(0, len(input_shape)))
+        reduction_axes = list(range(1, len(input_shape)))
         
         beta = inputs[1]
         gamma = inputs[2]

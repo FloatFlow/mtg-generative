@@ -118,12 +118,12 @@ class StyleGAN():
         img_in = Input(shape=(self.img_dim_x, self.img_dim_y, self.img_depth))
         class_in = Input(shape=(self.n_classes, ))
         
-        x = Conv2D(filters=ch,
+        x = EqualizedConv2D(filters=ch,
                    kernel_size=1,
                    padding='same',
                    kernel_initializer=self.kernel_init)(img_in)
         x = LeakyReLU(0.2)(x)
-        x = Conv2D(filters=ch,
+        x = EqualizedConv2D(filters=ch,
                    kernel_size=3,
                    padding='same',
                    kernel_initializer=self.kernel_init)(x)
@@ -139,12 +139,15 @@ class StyleGAN():
         x = style_discriminator_block(x, ch, kernel_init=self.kernel_init) #8x128
         x = style_discriminator_block(x, ch, kernel_init=self.kernel_init) #4x128
         x = MiniBatchStd()(x)
-        x = Conv2D(filters=ch,
-                   kernel_size=4,
+        x = EqualizedConv2D(filters=ch,
+                   kernel_size=,
                    padding='valid',
                    kernel_initializer=self.kernel_init)(x)
         x = LeakyReLU(0.2)(x)
-        x = GlobalAveragePooling2D()(x)
+        #x = GlobalAveragePooling2D()(x)
+        x = Flatten()(x)
+        x = EqualizedDense(units=ch, kernel_initializer=self.kernel_init)(x)
+        x = LeakyReLU(0.2)(x)
 
         # architecture of tail stem
         model_out = Dense(1, kernel_initializer=self.kernel_init)(x)
