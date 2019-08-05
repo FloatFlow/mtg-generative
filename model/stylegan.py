@@ -56,8 +56,8 @@ class StyleGAN():
         self.n_classes = n_classes
         
         
-        self.noise_samples = np.concatenate([np.random.normal(0, 0.8, size=(self.n_noise_samples, self.z_len)), \
-                                            label_generator(self.n_noise_samples, seed=42)], axis=1)
+        self.style_samples = np.random.normal(0, 0.8, size=(self.n_noise_samples, self.z_len))
+        self.label_samples = label_generator(self.n_noise_samples, seed=42)
         self.model_name = 'stylegan'
         self.latent_type = 'constant' # or learned
         self.gp_weight = 5
@@ -283,7 +283,7 @@ class StyleGAN():
         if not os.path.isdir(self.validation_dir):
             os.mkdir(self.validation_dir)
         dummy_latent = np.ones(shape=(self.noise_samples.shape[0], self.z_len))
-        predicted_imgs = self.generator.predict([self.noise_samples, dummy_latent])
+        predicted_imgs = self.generator.predict([self.style_samples, self.label_samples, dummy_latent])
         predicted_imgs = [((img+1)*127.5).astype(np.uint8) for img in predicted_imgs]
 
         # fill a grid
