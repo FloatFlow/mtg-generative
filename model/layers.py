@@ -107,6 +107,36 @@ class LearnedConstantLatent(Layer):
     def compute_output_shape(self, input_shape):
         return input_shape
 
+class LatentPixelNormalization(Layer):
+    def __init__(self, **kwargs):
+
+        super(LatentPixelNormalization, self).__init__(**kwargs)
+
+    def build(self, input_shape):
+        super(LatentPixelNormalization, self).build(input_shape)
+
+    def call(self, inputs):
+        latent = inputs * (K.constant(1.0)/ K.sqrt(K.mean(K.square(inputs), axis=-1, keepdims=True) + K.epsilon()))
+        return latent
+
+    def compute_output_shape(self, input_shape):
+        return input_shape
+
+class ConstantLatent(Layer):
+    def __init__(self, **kwargs):
+        super(ConstantLatent, self).__init__(**kwargs)
+
+    def build(self, input_shape):
+        super(ConstantLatent, self).build(input_shape)
+
+    def call(self, inputs):
+        input_shape = K.shape(inputs)
+        latent = K.ones((input_shape[0], 4, 4, input_shape[-1]))
+        return latent
+
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], 4, 4, input_shape[-1])
+
 class MiniBatchStd(Layer):
     def __init__(self, group_size=4, n_new_features=1, **kwargs):
         self.group_size = group_size

@@ -58,8 +58,10 @@ class StyleGAN():
         
         self.noise_samples = np.concatenate([np.random.normal(0, 0.8, size=(self.n_noise_samples, self.z_len)), \
                                             label_generator(self.n_noise_samples, seed=42)], axis=1)
+        self.model_name = 'stylegan'
+        self.latent_type = 'constant' # or learned
         self.gp_weight = 5
-        self.loss_type = 'hinge'
+        self.loss_type = 'nonsaturating'
         self.kernel_init = VarianceScaling(scale=np.sqrt(2), mode='fan_in', distribution='normal')
 
 
@@ -74,21 +76,29 @@ class StyleGAN():
     2048    128
     '''
     def build_generator(self, ch=128):
-        style_in = Input(shape=(self.z_len+self.n_classes, ))
-        style = Dense(units=self.z_len, kernel_initializer=self.kernel_init)(style_in)
+        style_in = Input(shape=(self.z_len, ))
+        label_in = Input(shape=(self.n_classes, ))
+        label_embed = Dense(self.n_classes, kernel_initializer=self.kernel_init)(label_in)
+        style = Concatenate(axis=-1)([style_in, label_embed])
+        style = LatentPixelNormalization()(style)
+        style = Dense(self.z_len, kernel_initializer=self.kernel_init)(style)
         style = LeakyReLU(0.2)(style)
-        style = Dense(units=self.z_len, kernel_initializer=self.kernel_init)(style)
+        style = Dense(self.z_len, kernel_initializer=self.kernel_init)(style)
         style = LeakyReLU(0.2)(style)
-        style = Dense(units=self.z_len, kernel_initializer=self.kernel_init)(style)
+        style = Dense(self.z_len, kernel_initializer=self.kernel_init)(style)
         style = LeakyReLU(0.2)(style)
-        style = Dense(units=self.z_len, kernel_initializer=self.kernel_init)(style)
+        style = Dense(self.z_len, kernel_initializer=self.kernel_init)(style)
         style = LeakyReLU(0.2)(style)
 
 
         latent_in = Input(shape=(self.z_len, ))
-        x = LearnedConstantLatent()(latent_in)
-        x = Dense(units=4*4*ch, kernel_initializer=VarianceScaling(scale=np.sqrt(2)/4, mode='fan_in', distribution='normal'))(x)
-        x = Reshape((4, 4, -1))(x)
+        if self.latent_type == 'learned':
+            x = LearnedConstantLatent()(latent_in)
+            x = Dense(units=4*4*ch, kernel_initializer=VarianceScaling(scale=np.sqrt(2)/4, mode='fan_in', distribution='normal'))(x)
+            x = Reshape((4, 4, -1))(x)
+        else:
+            x = ConstantLatent()(latent_in)
+            x = epilogue_block(x, style)
 
         x = style_generator_block(x, style, ch, kernel_init=self.kernel_init, upsample=False) #4x128
         x = style_generator_block(x, style, ch, kernel_init=self.kernel_init) #8x128
@@ -107,7 +117,7 @@ class StyleGAN():
                    kernel_initializer=VarianceScaling(scale=1, mode='fan_in', distribution='normal'))(x)
         model_out = Activation('tanh')(x)
 
-        self.generator = Model([style_in, latent_in], model_out)   
+        self.generator = Model([style_in, label_in, latent_in], model_out)   
         print(self.generator.summary())
         with open('{}_architecture.txt'.format(self.name), 'w') as f:
             self.generator.summary(print_fn=lambda x: f.write(x + '\n'))
@@ -201,10 +211,10 @@ class StyleGAN():
         self.frozen_discriminator.trainable = False
 
         # build generator model
-        style_in = Input(shape=(self.z_len+self.n_classes,))
+        style_in = Input(shape=(self.z_len, ))
         latent_in = Input(shape=(self.z_len, ))
-        class_in = Input(shape=(self.n_classes,))
-        fake_img = self.generator([style_in, latent_in])
+        class_in = Input(shape=(self.n_classes, ))
+        fake_img = self.generator([style_in, class_in, latent_in])
         frozen_fake_label = self.frozen_discriminator([fake_img, class_in])
 
         self.generator_model = Model([style_in, latent_in, class_in], frozen_fake_label)
@@ -233,21 +243,20 @@ class StyleGAN():
                 real_batch, real_labels = card_generator.next()
 
                 style = np.random.normal(0, 1, size=(self.batch_size, self.z_len))
-                style_labels = np.concatenate([style, real_labels], axis=1)
                 dummy_latent = np.ones(shape=(self.batch_size, self.z_len))
                 dummy = np.ones(shape=(self.batch_size, ))
                 ones = np.ones(shape=(self.batch_size, ))
                 zeros = np.zeros(shape=(self.batch_size, ))
                 neg_ones = -ones
 
-                fake_batch = self.generator.predict([style_labels, dummy_latent])
+                fake_batch = self.generator.predict([style, real_labels, dummy_latent])
                 
                 d_loss = self.discriminator_model.train_on_batch([real_batch, fake_batch, real_labels],
                                                                  [ones, neg_ones, dummy])
                 d_loss = sum(d_loss)
                 d_loss_accum.append(d_loss)
             
-                g_loss = self.generator_model.train_on_batch([style_labels, dummy_latent, real_labels], ones)
+                g_loss = self.generator_model.train_on_batch([style, dummy_latent, real_labels], ones)
                 g_loss_accum.append(g_loss)
                 
 
@@ -291,7 +300,7 @@ class StyleGAN():
             img_grid[y:y+self.img_dim_y, x:x+self.img_dim_x, :] = img
 
         img_grid = Image.fromarray(img_grid.astype(np.uint8))
-        img_grid.save(os.path.join(self.validation_dir, "validation_img_{}.png".format(epoch)))
+        img_grid.save(os.path.join(self.validation_dir, "{}_validation_img_{}.png".format(self.model_name, epoch)))
 
 
     def noise_validation_wlabel(self):
@@ -303,8 +312,16 @@ class StyleGAN():
     def save_model_weights(self, epoch, d_loss, g_loss):
         if not os.path.isdir(self.checkpoint_dir):
             os.mkdir(self.checkpoint_dir)
-        generator_savename = os.path.join(self.checkpoint_dir, 'minigan_generator_weights_{}_{:.3f}.h5'.format(epoch, g_loss))
-        discriminator_savename = os.path.join(self.checkpoint_dir, 'minigan_discriminator_weights_{}_{:.3f}.h5'.format(epoch, d_loss))
+        generator_savename = os.path.join(self.checkpoint_dir,
+                                          '{}_{}_generator_weights_{}_{:.3f}.h5'.format(self.model_name,
+                                                                                        self.loss_type,
+                                                                                        epoch,
+                                                                                        g_loss))
+        discriminator_savename = os.path.join(self.checkpoint_dir,
+                                          '{}_{}_discriminator_weights_{}_{:.3f}.h5'.format(self.model_name,
+                                                                                        self.loss_type,
+                                                                                        epoch,
+                                                                                        d_loss))
         self.generator.save_weights(generator_savename)
         self.discriminator.save_weights(discriminator_savename)
 

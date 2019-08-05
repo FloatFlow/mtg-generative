@@ -31,16 +31,13 @@ def wgan_loss(y_true, y_pred):
     return K.mean(y_true*y_pred)
 
 def nonsat_fake_discriminator_loss(y_true, y_pred):
-    """nonsaturating wgan loss only has fake critic loss"""
-    first_term = -K.log(K.sigmoid(y_pred))
-    second_term = K.log(K.sigmoid(1.0-y_pred))
-    return K.mean(first_term - second_term)
+    return K.mean(K.softplus(y_pred))
 
 def nonsat_real_discriminator_loss(y_true, y_pred):
-    return K.constant(0)
+    return -K.softplus(y_pred)
 
 def nonsat_generator_loss(y_true, y_pred):
-    return K.mean(-K.log(K.sigmoid(y_pred)))
+    return K.mean(K.softplus(-y_pred))
 
 #r1/r2 gradient penalty
 def gradient_penalty_loss(y_true, y_pred, averaged_samples, weight=1):
@@ -49,7 +46,7 @@ def gradient_penalty_loss(y_true, y_pred, averaged_samples, weight=1):
     gradients_sqr = K.square(gradients)
     gradient_penalty = K.sum(gradients_sqr,
                               axis=np.arange(1, len(gradients_sqr.shape)))
-    
+    gradient_penalty = K.sqrt(gradient_penalty + K.epsilon())
     # weight * ||grad||^2
     # Penalize the gradient norm
     return K.mean(gradient_penalty * weight)
