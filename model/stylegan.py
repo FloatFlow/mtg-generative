@@ -57,11 +57,11 @@ class StyleGAN():
         
         
         self.style_samples = np.random.normal(0, 0.8, size=(self.n_noise_samples, self.z_len))
-        self.label_samples = label_generator(self.n_noise_samples, seed=42)
+        self.label_samples = label_generator(self.n_noise_samples, seed=42, n_classes=2)
         self.model_name = 'stylegan'
-        self.latent_type = 'constant' # or learned
-        self.gp_weight = 5
-        self.loss_type = 'nonsaturating'
+        self.latent_type = 'constant' # constant or learned
+        self.gp_weight = 10 # is really gamma = 5 due to definition
+        self.loss_type = 'hinge'
         self.kernel_init = VarianceScaling(scale=np.sqrt(2), mode='fan_in', distribution='normal')
 
 
@@ -93,12 +93,11 @@ class StyleGAN():
 
         latent_in = Input(shape=(self.z_len, ))
         if self.latent_type == 'learned':
-            x = LearnedConstantLatent()(latent_in)
-            x = Dense(units=4*4*ch, kernel_initializer=VarianceScaling(scale=np.sqrt(2)/4, mode='fan_in', distribution='normal'))(x)
+            x = LearnedConstantLatent(latent_size=self.z_len*4*4)(latent_in)
+            x = Dense(units=4*4*self.z_len, kernel_initializer=VarianceScaling(scale=np.sqrt(2)/4, mode='fan_in', distribution='normal'))(x)
             x = Reshape((4, 4, -1))(x)
         else:
             x = ConstantLatent()(latent_in)
-            x = epilogue_block(x, style)
 
         x = style_generator_block(x, style, ch, kernel_init=self.kernel_init, upsample=False) #4x128
         x = style_generator_block(x, style, ch, kernel_init=self.kernel_init) #8x128
@@ -282,7 +281,7 @@ class StyleGAN():
         print('Generating Images...')
         if not os.path.isdir(self.validation_dir):
             os.mkdir(self.validation_dir)
-        dummy_latent = np.ones(shape=(self.noise_samples.shape[0], self.z_len))
+        dummy_latent = np.ones(shape=(self.style_samples.shape[0], self.z_len))
         predicted_imgs = self.generator.predict([self.style_samples, self.label_samples, dummy_latent])
         predicted_imgs = [((img+1)*127.5).astype(np.uint8) for img in predicted_imgs]
 
@@ -313,13 +312,15 @@ class StyleGAN():
         if not os.path.isdir(self.checkpoint_dir):
             os.mkdir(self.checkpoint_dir)
         generator_savename = os.path.join(self.checkpoint_dir,
-                                          '{}_{}_generator_weights_{}_{:.3f}.h5'.format(self.model_name,
+                                          '{}_{}_{}latent_generator_weights_{}_{:.3f}.h5'.format(self.model_name,
                                                                                         self.loss_type,
+                                                                                        self.latent_type,
                                                                                         epoch,
                                                                                         g_loss))
         discriminator_savename = os.path.join(self.checkpoint_dir,
-                                          '{}_{}_discriminator_weights_{}_{:.3f}.h5'.format(self.model_name,
+                                          '{}_{}_{}latent_discriminator_weights_{}_{:.3f}.h5'.format(self.model_name,
                                                                                         self.loss_type,
+                                                                                        self.latent_type,
                                                                                         epoch,
                                                                                         d_loss))
         self.generator.save_weights(generator_savename)

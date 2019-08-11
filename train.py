@@ -29,13 +29,13 @@ def parse_args():
                         default='logging/model_saves')
     parser.add_argument('--load_checkpoint',
                         type=bool,
-                        default=False)
+                        default=True)
     parser.add_argument('--g_weights',
                         type=str,
-                        default='logging/model_saves/minigan_generator_weights_15_-0.116.h5')
+                        default='logging/model_saves/stylegan_hinge_generator_weights_18_-0.002.h5')
     parser.add_argument('--d_weights',
                         type=str,
-                        default='logging/model_saves/minigan_discriminator_weights_15_3.923.h5')
+                        default='logging/model_saves/stylegan_hinge_discriminator_weights_18_4.003.h5')
     parser.add_argument('--epochs',
                         type=int,
                         default=1000)

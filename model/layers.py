@@ -88,12 +88,17 @@ class LowPassFilter2D(Layer):
         return input_shape
 
 class LearnedConstantLatent(Layer):
-    def __init__(self, **kwargs):
+    def __init__(self, latent_size=None, **kwargs):
+        self.latent_size = latent_size
         self.latent = None
         super(LearnedConstantLatent, self).__init__(**kwargs)
 
     def build(self, input_shape):
-        self.latent = self.add_weight(shape=(input_shape[-1], ),
+        if self.latent == None:
+            weight_dim = input_shape[-1]
+        else:
+            weight_dim = self.latent_size
+        self.latent = self.add_weight(shape=(weight_dim, ),
                                       name='learned_latent',
                                       initializer='ones')
         super(LearnedConstantLatent, self).build(input_shape)

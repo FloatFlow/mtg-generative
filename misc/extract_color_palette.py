@@ -13,11 +13,11 @@ def parse_args():
 
     # general parameters
     parser.add_argument('--img_dir',
-                        default='Dataset/images',
+                        default='../data/mtg_images',
                         help='Directory of images')
     parser.add_argument('--n_colors',
                         type=int,
-                        default=8,
+                        default=16,
                         help='')
 
 
@@ -49,7 +49,12 @@ def main():
         #img = Image.open(img_file)
         palette_objs = colorgram.extract(os.path.join(args.img_dir, img_file), 
                                          args.n_colors)
-        dom_palette = np.array([color.rgb for color in palette_objs])
+        dom_palette = [color.rgb for color in palette_objs]
+        n_results = len(dom_palette)
+        while len(dom_palette) < args.n_colors:
+        	idx = np.random.randint(n_results)
+        	dom_palette.append(dom_palette[idx])
+        dom_palette = np.array(dom_palette)
         palettes.append(dom_palette)
         labels.append(onehot_label)
         pbar.update()
@@ -60,13 +65,13 @@ def main():
     print('Palettes shape: {}'.format(palettes.shape))
     print('Labels shape: {}'.format(labels.shape))
 
-    palette_path = os.path.join('Dataset',
+    palette_path = os.path.join('../data',
                                 'color_palettes',
                                 'mtg_card_palettes_top{}.npy'.format(args.n_colors))
     np.save(palette_path,
             palettes)
 
-    label_path = os.path.join('Dataset',
+    label_path = os.path.join('../data',
                               'color_palettes',
                               'mtg_card_labels.npy')
     np.save(label_path, 

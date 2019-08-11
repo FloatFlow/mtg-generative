@@ -10,6 +10,7 @@ from multiprocessing import Process, Queue, Lock, Value
 import time
 from functools import partial
 import keras.backend as K
+from keras.utils import Sequence
 
 ####################################################
 ## Loss functions
@@ -124,6 +125,7 @@ def crop_square_from_rec(img, img_dim=256):
         img = img[:, rand_position:rand_position+img_dim, :]
     else:
         img = img[rand_position:rand_position+img_dim, :, :]
+    img = img_resize(img, img_dim, img_dim)
     return img
 
 def card_crop(img_path, img_dim=256):
@@ -140,6 +142,7 @@ def card_crop(img_path, img_dim=256):
         if random_method == 0:
             img = crop_square_from_rec(img, img_dim=img_dim)
         # take random crop from image
+        
         else:
             smallest_axis_len = min(img.shape[:2])
             percent = np.random.randint(80, 99)/100
@@ -160,18 +163,22 @@ def card_crop(img_path, img_dim=256):
         img = img[:, ::-1, :]
 
     # normalize
-    img = img[:,:,::-1]
+    img = img[:, :, ::-1]
     img = img/127.5
     img = img-1.0
     img = np.array(img).astype(np.float32)
     return img
 
 
-def label_generator(n_samples, seed):
-    sample_list = list(itertools.permutations([1,0,0,0,0])) + list(itertools.permutations([1,1,0,0,0])) + list(itertools.permutations([1,1,1,0,0]))
+def label_generator(n_samples, seed, n_classes=2):
+    sample_list = list(itertools.permutations([1,0,0,0,0])) 
+    if n_classes >= 2:
+        sample_list = sample_list + list(itertools.permutations([1,1,0,0,0]))
+    if n_classes >= 3: 
+        sample_list = sample_list + list(itertools.permutations([1,1,1,0,0]))
     random.seed(seed)
     random.shuffle(sample_list)
-    return sample_list[:n_samples]
+    return np.array(sample_list[:n_samples])
 
 def onehot_label_encoder(str_label):
     # convert labels to one-hot encoded
@@ -187,6 +194,22 @@ def onehot_label_encoder(str_label):
             one_hot_label += v
     return one_hot_label
 
+def onehot_label_decoder(one_hot_label):
+    # convert labels to one-hot encoded
+    str_label = []
+    for i, label in enumerate(one_hot_label):
+        if (i == 0) and (label == 1):
+            str_label.append('W')
+        if (i == 1) and (label == 1):
+            str_label.append('B')
+        if (i == 2) and (label == 1):
+            str_label.append('U')
+        if (i == 3) and (label == 1):
+            str_label.append('G')
+        if (i == 4) and (label == 1):
+            str_label.append('R')
+    return str(str_label)
+
 ####################################################
 ## Data Generator
 ####################################################
@@ -197,7 +220,7 @@ class CardGenerator():
                  batch_size,
                  n_cpu,
                  img_dim,
-                 file_type='.jpg'):
+                 file_type=('.jpg', '.png', '.jpeg', '.mp4')):
         self.img_dir = img_dir
         self.img_dim = img_dim
         self.file_type = file_type
@@ -261,3 +284,22 @@ class CardGenerator():
     def end(self):
         self.run = False
         self.queue.close()
+
+
+class KerasImageGenerator(Sequence):
+    def __init__(self, x, y, batch_size, img_dim):
+        self.x, self.y = x, y
+        self.batch_size = batch_size
+        self.img_dim = img_dim
+
+    def __len__(self):
+        return int(np.ceil(len(self.x) / float(self.batch_size)))
+
+    def __getitem__(self, idx):
+        batch_x = self.x[idx * self.batch_size:(idx + 1) * self.batch_size]
+        batch_y = self.y[idx * self.batch_size:(idx + 1) * self.batch_size]
+
+        # read your data here using the batch lists, batch_x and batch_y
+        x = np.array([card_crop(x_val, self.img_dim) for x_val in batch_x])
+        
+        return np.array(x), np.array(batch_y)

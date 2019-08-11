@@ -61,12 +61,16 @@ def style_generator_block(inputs,
 def style_discriminator_block(inputs,
                               output_dim,
                               downsample=True,
-                              kernel_init='he_normal'):
+                              kernel_init='he_normal',
+                              activation='leaky'):
     x = Conv2D(filters=output_dim,
                kernel_size=3,
                padding='same',
                kernel_initializer=kernel_init)(inputs)
-    x = LeakyReLU(0.2)(x)
+    if activation == 'leaky':
+        x = LeakyReLU(0.2)(x)
+    else:
+        x = Activation('relu')(x)
     if downsample:
         x = LowPassFilter2D()(x)
         x = Conv2D(filters=output_dim,
@@ -79,5 +83,9 @@ def style_discriminator_block(inputs,
                    kernel_size=3,
                    padding='same',
                    kernel_initializer=kernel_init)(x)
-    x = LeakyReLU(0.2)(x)
+    if activation == 'leaky':
+        x = LeakyReLU(0.2)(x)
+    else:
+        x = Activation('relu')(x)
     return x
+
