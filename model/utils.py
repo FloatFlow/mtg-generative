@@ -11,6 +11,7 @@ import time
 from functools import partial
 import keras.backend as K
 from keras.utils import Sequence
+#import colorgram
 
 ####################################################
 ## Loss functions
@@ -106,6 +107,9 @@ def img_resize(img, y_dim, x_dim):
                          (y_dim, x_dim),
                          interpolation=cv2.INTER_AREA)
     return img
+
+def batch_resize(batch, dim):
+    return np.stack([img_resize(img, dim, dim) for img in batch])
 
 def crop_square_from_rec(img, img_dim=256):
     # resize based on smallest axis
@@ -285,6 +289,82 @@ class CardGenerator():
         self.run = False
         self.queue.close()
 
+class MSGCardGenerator():
+    def __init__(self,
+                 img_dir,
+                 batch_size,
+                 n_cpu,
+                 img_dim,
+                 file_type=('.jpg', '.png', '.jpeg', '.mp4')):
+        self.img_dir = img_dir
+        self.img_dim = img_dim
+        self.file_type = file_type
+        self.batch_size = batch_size
+        self.n_cpu = n_cpu
+        self.queue = Queue(maxsize=self.n_cpu*4)
+        self.lock = Lock()
+        self.run = True
+        self.counter = Value('i', 0)
+        self.generate_data_paths()
+
+        for _ in range(self.n_cpu):
+             p = Process(target=self.fetch_batch)
+             p.start()
+
+    def generate_data_paths(self):
+        img_paths = []
+        img_labels = []
+        for file in os.listdir(self.img_dir):
+            if file.endswith(self.file_type):
+                img_paths.append(os.path.join(self.img_dir, file))
+                label = os.path.basename(file).split('.')[0].split('_')[-1]
+                img_labels.append(label)
+
+        # store paths and labels
+        self.df = pd.DataFrame({'paths':img_paths, 'labels':img_labels})
+        self.n_batches = (self.df.shape[0]//self.batch_size) - 1
+        self.indices = np.arange(self.n_batches)
+
+    def fetch_batch(self):
+        while self.run:
+
+            while self.queue.full():
+                time.sleep(0.1)
+
+            self.lock.acquire()
+            idx = self.counter.value
+            self.counter.value += 1
+            if self.counter.value >= self.n_batches:
+                self.counter.value = 0
+            self.lock.release()
+
+            try:
+                positions = self.indices[idx*self.batch_size:(idx+1)*self.batch_size]
+                numpy_batch = np.array([card_crop(img_path, self.img_dim) for img_path in self.df['paths'].iloc[positions]])
+                label_batch = np.array([onehot_label_encoder(label) for label in self.df['labels'].iloc[positions]])
+                gsm_numpy_batchs = [numpy_batch]
+                current_dim = self.img_dim
+                while current_dim >= 8:
+                    current_dim = current_dim//2
+                    gsm_numpy_batchs.append(batch_resize(numpy_batch, current_dim))
+
+                if numpy_batch.shape == (self.batch_size, self.img_dim, self.img_dim, 3):
+                    self.queue.put((gsm_numpy_batchs, label_batch))
+            except ValueError:
+                continue
+
+    def next(self):
+        while self.queue.empty():
+            time.sleep(0.1)
+        return self.queue.get()
+
+    def shuffle(self):
+        self.df = self.df.sample(frac=1.0).reset_index(drop=True)
+
+    def end(self):
+        self.run = False
+        self.queue.close()
+
 
 class KerasImageGenerator(Sequence):
     def __init__(self, x, y, batch_size, img_dim):
@@ -303,3 +383,90 @@ class KerasImageGenerator(Sequence):
         x = np.array([card_crop(x_val, self.img_dim) for x_val in batch_x])
         
         return np.array(x), np.array(batch_y)
+'''
+class PaletteGenerator():
+    def __init__(self,
+                 img_dir,
+                 batch_size,
+                 n_cpu,
+                 n_palette,
+                 file_type=('.jpg', '.png', '.jpeg', '.mp4')):
+        self.img_dir = img_dir
+        self.file_type = file_type
+        self.batch_size = batch_size
+        self.n_cpu = n_cpu
+        self.n_palette = n_palette
+        self.queue = Queue(maxsize=self.n_cpu*4)
+        self.lock = Lock()
+        self.run = True
+        self.counter = Value('i', 0)
+        self.generate_data_paths()
+
+        for _ in range(self.n_cpu):
+             p = Process(target=self.fetch_batch)
+             p.start()
+
+    def generate_data_paths(self):
+        img_paths = []
+        for file in os.listdir(self.img_dir):
+            if file.endswith(self.file_type):
+                img_paths.append(os.path.join(self.img_dir, file))
+
+        # store paths and labels
+        self.df = pd.DataFrame({'paths':img_paths})
+        self.df.drop_duplicates(inplace=True)
+        if self.df.shape[0] % self.batch_size != 0:
+            self.n_batches = (self.df.shape[0]//self.batch_size) + 1
+        else:
+            self.n_batches = (self.df.shape[0]//self.batch_size)
+        self.indices = np.arange(self.n_batches)
+
+    def fetch_batch(self):
+        while self.run:
+
+            while self.queue.full():
+                time.sleep(0.1)
+
+            self.lock.acquire()
+            idx = self.counter.value
+            self.counter.value += 1
+            if self.counter.value >= self.n_batches:
+                self.counter.value = 0
+                self.run = False
+            self.lock.release()
+
+            if idx != (self.n_batches-1):
+                positions = self.indices[idx*self.batch_size:(idx+1)*self.batch_size]
+            else:
+                positions = self.indices[idx*self.batch_size:]
+            file_batch = self.df['paths'].iloc[positions]
+            
+            palettes = []
+            for img_path in file_batch:
+                palette_objs = colorgram.extract(img_path, 
+                                                 self.n_palette)
+                dom_palette = [[color.rgb.r, color.rgb.g, color.rgb.b] for color in palette_objs]
+                n_results = len(dom_palette)
+                while len(dom_palette) < self.n_palette:
+                    idx = np.random.randint(n_results)
+                    dom_palette.append(dom_palette[idx])
+                dom_palette = np.array(dom_palette)
+                palettes.append(dom_palette)
+            
+            palettes = np.array(palettes)
+
+            if palettes.shape == (len(file_batch), self.n_palette, 3):
+                self.queue.put((palettes, file_batch.values))
+
+    def next(self):
+        while self.queue.empty():
+            time.sleep(0.1)
+        return self.queue.get()
+
+    def shuffle(self):
+        self.df = self.df.sample(frac=1.0).reset_index(drop=True)
+
+    def end(self):
+        self.run = False
+        self.queue.close()
+'''

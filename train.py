@@ -1,6 +1,8 @@
 import argparse
+import keras.backend as K
 from model.minigan import MiniGAN
 from model.stylegan import StyleGAN
+from model.msggan import MSGGAN
 import psutil
 
 N_CPU = psutil.cpu_count()
@@ -11,7 +13,7 @@ def parse_args():
     # general parameters
     parser.add_argument('--model_type',
                         type=str,
-                        default='stylegan')
+                        default='msggan')
     parser.add_argument('--train',
                         type=bool,
                         default=True)
@@ -29,7 +31,7 @@ def parse_args():
                         default='logging/model_saves')
     parser.add_argument('--load_checkpoint',
                         type=bool,
-                        default=True)
+                        default=False)
     parser.add_argument('--g_weights',
                         type=str,
                         default='logging/model_saves/stylegan_hinge_generator_weights_18_-0.002.h5')
@@ -76,6 +78,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    K.set_floatx('float32')
 
     if args.model_type == 'minigan':
         gan = MiniGAN(img_dim_x=args.img_dim_x,
@@ -94,6 +97,21 @@ def main():
                       n_cpu=args.n_cpu)
     elif args.model_type == 'stylegan':
         gan = StyleGAN(img_dim_x=args.img_dim_x,
+                       img_dim_y=args.img_dim_y,
+                       img_depth=args.img_depth,
+                       z_len=args.z_len,
+                       g_lr=args.g_lr,
+                       d_lr=args.d_lr,
+                       save_freq=args.save_freq,
+                       training_dir=args.training_dir,
+                       validation_dir=args.validation_dir,
+                       checkpoint_dir=args.checkpoint_dir,
+                       testing_dir=args.testing_dir,
+                       batch_size=args.batch_size,
+                       n_classes=args.n_classes,
+                       n_cpu=args.n_cpu)
+    elif args.model_type == 'msggan':
+        gan = MSGGAN(img_dim_x=args.img_dim_x,
                        img_dim_y=args.img_dim_y,
                        img_depth=args.img_depth,
                        z_len=args.z_len,

@@ -10,6 +10,7 @@ from keras.callbacks import ModelCheckpoint
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 import colorgram
+from model.utils import PaletteGenerator
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Parameters for small CNN')
@@ -17,11 +18,11 @@ def parse_args():
     # general parameters
     parser.add_argument('--train_x',
                         type=str,
-                        default='../data/color_palettes/mtg_card_palettes_top8.npy',
+                        default='data/color_palettes/mtg_card_palettes_top8.npy',
                         help='Extracted dominant color palettes')
     parser.add_argument('--train_y',
                         type=str,
-                        default='../data/color_palettes/mtg_card_labels.npy',
+                        default='data/color_palettes/mtg_card_labels.npy',
                         help='MTG colors for each card')
     parser.add_argument('--epochs',
                         type=int,
@@ -32,10 +33,13 @@ def parse_args():
                         default=True)
     parser.add_argument('--model_weights',
                         type=str,
-                        default='../logging/model_saves/mtg_palette_classifier/mtg_color_classifier_8colors.h5')
+                        default='logging/model_saves/mtg_palette_classifier/mtg_color_classifier_8colors.h5')
     parser.add_argument('--labeling_dir',
                         type=str,
-                        default='../data/test_labeling')
+                        default='data/test_labeling')
+    parser.add_argument('--n_cpu',
+                        type=int,
+                        default=3)
 
     return parser.parse_args()
 
@@ -110,50 +114,41 @@ class MtgColorClassifier():
                                                   self.val_y)
                                  )
 
-    def label(self, batch_size, labeling_dir):
-        path_df = pd.DataFrame({'filename': list(os.listdir(labeling_dir))})
+    def label(self, batch_size, labeling_dir, n_cpu):
+        n_batches = (len(list(os.listdir(labeling_dir)))//batch_size) + 1
+        palette_generator = PaletteGenerator(labeling_dir,
+                                             n_cpu=n_cpu,
+                                             batch_size=batch_size,
+                                             n_palette=self.n_palette)
+
+        img_paths = []
         predicted_labels = []
-
-        n_batches = (path_df.shape[0]//batch_size) + 1
-
         pbar = tqdm(total=n_batches)
         for batch_n in range(n_batches):
-            # define batch
-            if batch_n != (n_batches - 1):
-                file_batch = path_df['filename'].iloc[batch_n*batch_size:(batch_n+1)*batch_size]
-            else:
-                file_batch = path_df['filename'].iloc[batch_n*batch_size:]
-
-            # preprocessing; extract palettes
-            palettes = []
-            for img_file in file_batch:
-                palette_objs = colorgram.extract(os.path.join(labeling_dir, img_file), 
-                                                 self.n_palette)
-                dom_palette = [color.rgb for color in palette_objs]
-                n_results = len(dom_palette)
-                while len(dom_palette) < self.n_palette:
-                    idx = np.random.randint(n_results)
-                    dom_palette.append(dom_palette[idx])
-                dom_palette = np.array(dom_palette)
-                palettes.append(dom_palette)
-            
-            palettes = np.array(palettes)
+            palettes, img_names = palette_generator.next()
 
             # predict class
             y_pred = self.model.predict(palettes)
             y_pred = np.where(y_pred > 0.5, 1, 0)
             y_pred = [onehot_label_decoder(onehot_label) for onehot_label in y_pred]
+
+            img_paths.append(img_names)
             predicted_labels.append(y_pred)
-
+            
             pbar.update()
-
         pbar.close()
-        path_df['label'] = predicted_labels[0]
-        path_df['new_filename'] = ['{}_{}.png'.format(fname.split('.')[0], label) for fname, label in zip(path_df['filename'], path_df['label'])]
 
-        for i, row in path_df.iterrows():
-            os.rename(os.path.join(labeling_dir, row['filename']),
-                      os.path.join(labeling_dir, row['new_filename']))
+        img_paths =  [item for sublist in img_paths for item in sublist]
+        predicted_labels = [item for sublist in predicted_labels for item in sublist]
+        rename_df = pd.DataFrame({'filename':img_paths, 'label':predicted_labels})
+        rename_df.drop_duplicates(inplace=True)
+        pbar = tqdm(total=rename_df.shape[0])
+        for i, row in rename_df.iterrows():
+            new_fpath = '{}_{}.png'.format(row['filename'].split('.')[0], row['label'])
+            os.rename(row['filename'], new_fpath)
+            pbar.update()
+        pbar.close()
+        
 
 def main():
     args = parse_args()
@@ -168,7 +163,9 @@ def main():
     if args.epochs > 0:
         colormodel.train(epochs=args.epochs)    
 
-    colormodel.label(batch_size=32, labeling_dir=args.labeling_dir)
+    colormodel.label(batch_size=32,
+                     labeling_dir=args.labeling_dir,
+                     n_cpu=args.n_cpu)
 
 if __name__ == '__main__':
     main()
