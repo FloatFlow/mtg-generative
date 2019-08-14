@@ -3,6 +3,7 @@ import keras.backend as K
 from model.minigan import MiniGAN
 from model.stylegan import StyleGAN
 from model.msggan import MSGGAN
+from model.msgstylegan import MSGStyleGAN
 import psutil
 
 N_CPU = psutil.cpu_count()
@@ -13,7 +14,7 @@ def parse_args():
     # general parameters
     parser.add_argument('--model_type',
                         type=str,
-                        default='msggan')
+                        default='msgstylegan')
     parser.add_argument('--train',
                         type=bool,
                         default=True)
@@ -112,6 +113,21 @@ def main():
                        n_cpu=args.n_cpu)
     elif args.model_type == 'msggan':
         gan = MSGGAN(img_dim_x=args.img_dim_x,
+                       img_dim_y=args.img_dim_y,
+                       img_depth=args.img_depth,
+                       z_len=args.z_len,
+                       g_lr=args.g_lr,
+                       d_lr=args.d_lr,
+                       save_freq=args.save_freq,
+                       training_dir=args.training_dir,
+                       validation_dir=args.validation_dir,
+                       checkpoint_dir=args.checkpoint_dir,
+                       testing_dir=args.testing_dir,
+                       batch_size=args.batch_size,
+                       n_classes=args.n_classes,
+                       n_cpu=args.n_cpu)
+    elif args.model_type == 'msgstylegan':
+        gan = MSGStyleGAN(img_dim_x=args.img_dim_x,
                        img_dim_y=args.img_dim_y,
                        img_depth=args.img_depth,
                        z_len=args.z_len,

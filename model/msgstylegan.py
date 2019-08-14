@@ -16,7 +16,7 @@ from keras.utils import plot_model
 from functools import partial
 
 
-class MSGGAN():
+class MSGStyleGAN():
     def __init__(self, 
                  img_dim_x,
                  img_dim_y,
@@ -33,7 +33,7 @@ class MSGGAN():
                  testing_dir,
                  n_cpu,
                  n_noise_samples=16):
-        self.name = 'msggan'
+        self.name = 'msgstylegan'
         self.img_dim_x = img_dim_x
         self.img_dim_y = img_dim_y
         self.img_depth = img_depth
@@ -60,7 +60,9 @@ class MSGGAN():
         self.label_samples = label_generator(self.n_noise_samples, seed=42, n_classes=2)
         self.model_name = 'msggan'
         self.loss_type = 'hinge'
+        self.latent_type = 'constant'
         self.kernel_init = VarianceScaling(scale=np.sqrt(2))
+        self.gp_weight = 10
 
 
     ###############################
@@ -74,58 +76,50 @@ class MSGGAN():
     2048    128
     '''
     def build_generator(self, ch=128):
-        latent_in = Input(shape=(self.z_len, ))
+        style_in = Input(shape=(self.z_len, ))
         label_in = Input(shape=(self.n_classes, ))
-        label_embed = Dense(units=self.n_classes, kernel_initializer=self.kernel_init)(label_in)
-        x = Concatenate(axis=-1)([latent_in, label_embed])
-        x = LatentPixelNormalization()(x)
-        x = Dense(units=4*4*ch, kernel_initializer=self.kernel_init)(x)
-        x = Reshape((4, 4, -1))(x)
+        label_embed = Dense(self.n_classes, kernel_initializer=self.kernel_init)(label_in)
+        style = Concatenate(axis=-1)([style_in, label_embed])
+        style = LatentPixelNormalization()(style)
+        style = Dense(self.z_len, kernel_initializer=self.kernel_init)(style)
+        style = LeakyReLU(0.2)(style)
+        style = Dense(self.z_len, kernel_initializer=self.kernel_init)(style)
+        style = LeakyReLU(0.2)(style)
+        style = Dense(self.z_len, kernel_initializer=self.kernel_init)(style)
+        style = LeakyReLU(0.2)(style)
+        style = Dense(self.z_len, kernel_initializer=self.kernel_init)(style)
+        style = LeakyReLU(0.2)(style)
 
-        x = Conv2D(filters=ch,
-                            kernel_size=3,
-                            padding='same',
-                            kernel_initializer=self.kernel_init)(x)
-        x = LeakyReLU(0.2)(x)
-        x = PixelNormalization()(x) #4x128
 
-        out_4x = Conv2D(filters=3,
-                                 kernel_size=1,
-                                 padding='same',
-                                 kernel_initializer=self.kernel_init)(x)
-        out_4x = Activation('tanh')(out_4x)
+        latent_in = Input(shape=(self.z_len, ))
+        if self.latent_type == 'learned':
+            x = LearnedConstantLatent(latent_size=self.z_len*4*4)(latent_in)
+            x = Dense(units=4*4*self.z_len, kernel_initializer=VarianceScaling(scale=np.sqrt(2)/4, mode='fan_in', distribution='normal'))(x)
+            x = Reshape((4, 4, -1))(x)
+        else:
+            x = ConstantLatent()(latent_in)
+
+        x, out_4x = msg_style_generator_block(x, style, ch, kernel_init=self.kernel_init, upsample=False) #4x128
 
         #ch = ch//2
-        x, out_8x = msg_generator_block(x, ch, kernel_init=self.kernel_init) #8x128
+        x, out_8x = msg_style_generator_block(x, style, ch, kernel_init=self.kernel_init) #8x128
         #ch = ch//2
-        x, out_16x = msg_generator_block(x, ch, kernel_init=self.kernel_init) #16x128
+        x, out_16x = msg_style_generator_block(x, style, ch, kernel_init=self.kernel_init) #16x128
         #ch = ch//2
-        x, out_32x = msg_generator_block(x, ch, kernel_init=self.kernel_init) #32x128
+        x, out_32x = msg_style_generator_block(x, style, ch, kernel_init=self.kernel_init) #32x128
         ch = ch//2
-        x, out_64x = msg_generator_block(x, ch, kernel_init=self.kernel_init) #64x64
+        x, out_64x = msg_style_generator_block(x, style, ch, kernel_init=self.kernel_init) #64x64
         ch = ch//2
-        x, out_128x = msg_generator_block(x, ch, kernel_init=self.kernel_init) #128x32
+        x, out_128x = msg_style_generator_block(x, style, ch, kernel_init=self.kernel_init) #128x32
         ch = ch//2
-        x = UpSampling2D(2, interpolation='bilinear')(x)
-        x = Conv2D(filters=ch,
-                            kernel_size=3,
-                            padding='same',
-                            kernel_initializer=self.kernel_init)(x)
-        x = LeakyReLU(0.2)(x)
-        x = PixelNormalization()(x)
-        x = Conv2D(filters=ch,
-                            kernel_size=3,
-                            padding='same',
-                            kernel_initializer=self.kernel_init)(x)
-        x = LeakyReLU(0.2)(x)
-        x = PixelNormalization()(x)
+        x = style_generator_block(x, style, ch, kernel_init=self.kernel_init)
         x = Conv2D(filters=3,
                             kernel_size=1,
                             padding='same',
                             kernel_initializer=self.kernel_init)(x)
         out_256x = Activation('tanh')(x)
 
-        self.generator = Model([latent_in, label_in],
+        self.generator = Model([style_in, label_in, latent_in],
                                [out_256x, out_128x, out_64x, out_32x, out_16x, out_8x, out_4x])   
         print(self.generator.summary())
         with open('{}_architecture.txt'.format(self.name), 'w') as f:
@@ -142,57 +136,41 @@ class MSGGAN():
                    kernel_initializer=self.kernel_init)(img_in256)
         x = LeakyReLU(0.2)(x)
         x = Conv2D(filters=ch,
-                   kernel_size=3,
-                   padding='same',
-                   kernel_initializer=self.kernel_init)(x)
+               kernel_size=3,
+               padding='same',
+               kernel_initializer=kernel_init)(x)
         x = LeakyReLU(0.2)(x)
-        x = AveragePooling2D(2)(x)
+        x = LowPassFilter2D()(x)
         ch *= 2
         x = Conv2D(filters=ch,
-                   kernel_size=3,
-                   padding='same',
-                   kernel_initializer=self.kernel_init)(x)
-        x = LeakyReLU(0.2)(x) #128x32
+               kernel_size=3,
+               strides=2,
+               padding='same',
+               kernel_initializer=kernel_init)(x)
+        x = LeakyReLU(0.2)(x)
 
         ch *= 2
         img_in128 = Input(shape=(self.img_dim_x//2, self.img_dim_y//2, self.img_depth))
-        x = msg_discriminator_block(x, img_in128, ch, kernel_init=self.kernel_init) #64x64
+        x = msg_style_discriminator_block(x, img_in128, ch, kernel_init=self.kernel_init) #64x64
 
         ch *= 2
         img_in64 = Input(shape=(self.img_dim_x//4, self.img_dim_y//4, self.img_depth))
-        x = msg_discriminator_block(x, img_in64, ch, kernel_init=self.kernel_init) #32x128
+        x = msg_style_discriminator_block(x, img_in64, ch, kernel_init=self.kernel_init) #32x128
 
         #ch *= 2
         img_in32 = Input(shape=(self.img_dim_x//8, self.img_dim_y//8, self.img_depth))
-        x = msg_discriminator_block(x, img_in32, ch, kernel_init=self.kernel_init) #16x128
+        x = msg_style_discriminator_block(x, img_in32, ch, kernel_init=self.kernel_init) #16x128
 
         #ch *= 2
         img_in16 = Input(shape=(self.img_dim_x//16, self.img_dim_y//16, self.img_depth))
-        x = msg_discriminator_block(x, img_in16, ch, kernel_init=self.kernel_init) #8x128
+        x = msg_style_discriminator_block(x, img_in16, ch, kernel_init=self.kernel_init) #8x128
 
         #ch *= 2
         img_in8 = Input(shape=(self.img_dim_x//32, self.img_dim_y//32, self.img_depth))
-        x = msg_discriminator_block(x, img_in8, ch, kernel_init=self.kernel_init) #4x128
-
-        img_in4 = Input(shape=(self.img_dim_x//64, self.img_dim_y//64, self.img_depth))
-        img_features = Conv2D(filters=ch,
-                        kernel_size=1,
-                        padding='same',
-                        kernel_initializer=kernel_init)(img_in4)
-        img_features = LeakyReLU(0.2)(img_features)
-        x = Concatenate(axis=-1)([x, img_features])
-
+        x = msg_style_discriminator_block(x, img_in8, ch, kernel_init=self.kernel_init) #4x128
         x = MiniBatchStd()(x)
-        x = Conv2D(filters=ch,
-                   kernel_size=3,
-                   padding='same',
-                   kernel_initializer=self.kernel_init)(x)
-        x = LeakyReLU(0.2)(x)
-        x = Conv2D(filters=ch,
-                   kernel_size=4,
-                   padding='valid',
-                   kernel_initializer=self.kernel_init)(x)
-        x = LeakyReLU(0.2)(x)
+        img_in4 = Input(shape=(self.img_dim_x//64, self.img_dim_y//64, self.img_depth))
+        x = msg_style_discriminator_block(x, img_in4, ch, kernel_init=self.kernel_init, downsample=False) #4x128
 
         x = Flatten()(x)
 
@@ -243,22 +221,24 @@ class MSGGAN():
         real_label = self.discriminator(predict_real_list)
 
         discriminator_inputs = [x for xs in [real_in_list, fake_in_list, [class_in]] for x in xs]
-        self.discriminator_model = Model(discriminator_inputs, [real_label, fake_label])
+        self.discriminator_model = Model(discriminator_inputs, [real_label, fake_label, real_label])
         self.discriminator_model.compile(d_optimizer,
                                          loss=[loss_collection[0],
-                                               loss_collection[1]],
-                                         loss_weights=[1, 1])
+                                               loss_collection[1],
+                                               partial(gradient_penalty_loss, averaged_samples=real_in_list[0])],
+                                         loss_weights=[1, 1, self.gp_weight])
 
         self.frozen_discriminator.trainable = False
 
         # build generator model
+        style_in = Input(shape=(self.z_len, ))
         latent_in = Input(shape=(self.z_len, ))
         class_in = Input(shape=(self.n_classes, ))
-        fake_imgs = self.generator([latent_in, class_in])
+        fake_imgs = self.generator([style_in, class_in, latent_in])
         frozen_discriminator_inputs = [x for xs in [fake_imgs, [class_in]] for x in xs]
         frozen_fake_label = self.frozen_discriminator(frozen_discriminator_inputs)
 
-        self.generator_model = Model([latent_in, class_in], frozen_fake_label)
+        self.generator_model = Model([style_in, class_in, latent_in], frozen_fake_label)
         self.generator_model.compile(g_optimizer, loss_collection[2])
         
         print(self.discriminator_model.summary())
@@ -287,21 +267,21 @@ class MSGGAN():
             for batch_i in range(n_batches):
                 real_batch, real_labels = card_generator.next()
                 
-
-                latent_noise = np.random.normal(0, 1, size=(self.batch_size, self.z_len))
+                style = np.random.normal(0, 1, size=(self.batch_size, self.z_len))
+                dummy_latent = np.ones(shape=(self.batch_size, self.z_len))
                 dummy = np.ones(shape=(self.batch_size, ))
                 ones = np.ones(shape=(self.batch_size, ))
                 zeros = np.zeros(shape=(self.batch_size, ))
                 neg_ones = -ones
 
-                fake_batch = self.generator.predict([latent_noise, real_labels])
+                fake_batch = self.generator.predict([style, real_labels, dummy_latent])
                 discriminator_batch = [x for xs in [real_batch, fake_batch, [real_labels]] for x in xs]
                 d_loss = self.discriminator_model.train_on_batch(discriminator_batch,
-                                                                 [ones, neg_ones])
+                                                                 [ones, neg_ones, dummy])
                 d_loss = sum(d_loss)
                 d_loss_accum.append(d_loss)
             
-                g_loss = self.generator_model.train_on_batch([latent_noise, real_labels], ones)
+                g_loss = self.generator_model.train_on_batch([style, real_labels, dummy_latent], ones)
                 g_loss_accum.append(g_loss)
                 
 
@@ -327,7 +307,8 @@ class MSGGAN():
         print('Generating Images...')
         if not os.path.isdir(self.validation_dir):
             os.mkdir(self.validation_dir)
-        predicted_imgs = self.generator.predict([self.style_samples, self.label_samples])
+        dummy_latent = np.ones(shape=(self.style_samples.shape[0], self.z_len))
+        predicted_imgs = self.generator.predict([self.style_samples, self.label_samples, dummy_latent])
         predicted_imgs = [((img+1)*127.5).astype(np.uint8) for img in predicted_imgs[0]]
 
         # fill a grid
