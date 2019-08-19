@@ -8,7 +8,164 @@ from keras import initializers
 from keras import regularizers
 from keras import constraints
 from keras.utils import conv_utils
+import keras
 
+from tensorflow.python.training import moving_averages
+
+class TFVectorQuantizerEMA(Layer):
+    def __init__(self, num_embeddings=512, embedding_dim=64, commitment_cost=0.25, decay=0.99, epsilon=1e-5, training=True):
+        super(TFVectorQuantizerEMA, self).__init__()
+        self.embedding_dim = embedding_dim
+        self.num_embeddings = num_embeddings
+        self.commitment_cost = commitment_cost
+        self.decay = decay
+        self.epsilon = epsilon
+        self.training = training
+    
+    def build(self, input_shape):
+        self._w = self.add_weight('word_embeddings',
+                                         shape=(self.num_embeddings, self.embedding_dim),
+                                         initializer=initializers.RandomNormal(0, 1))
+
+        self._ema_w = self.add_weight('ema_w',
+                                     shape=(self.num_embeddings, self.embedding_dim),
+                                     initializer=initializers.RandomNormal(0, 1))
+        self._ema_cluster_size = self.add_weight('ema_cluster_size',
+                                             (self.num_embeddings, ),
+                                             initializer='zeros')
+        super(TFVectorQuantizerEMA, self).build(input_shape)
+
+    def call(self, inputs, **kwargs):
+        input_shape = tf.shape(inputs)
+        with tf.control_dependencies([
+            tf.Assert(tf.equal(input_shape[-1], self.embedding_dim),
+                      [input_shape])]):
+            flat_inputs = tf.reshape(inputs, [-1, self.embedding_dim])
+
+        distances = (tf.reduce_sum(flat_inputs**2, 1, keepdims=True)
+                     - 2 * tf.matmul(flat_inputs, self._w)
+                     + tf.reduce_sum(self._w ** 2, 0, keepdims=True))
+
+        encoding_indices = tf.argmax(- distances, 1)
+        encodings = tf.one_hot(encoding_indices, self.num_embeddings)
+        encoding_indices = tf.reshape(encoding_indices, tf.shape(inputs)[:-1])
+        #quantized = self.quantize(encoding_indices)
+        with tf.control_dependencies([encoding_indices]):
+            w = tf.transpose(self._w, [1, 0])
+            quantized = tf.nn.embedding_lookup(w, encoding_indices, validate_indices=False)
+        e_latent_loss = tf.reduce_mean((tf.stop_gradient(quantized) - inputs) ** 2)
+
+        if self.training:
+            updated_ema_cluster_size = moving_averages.assign_moving_average(
+                self._ema_cluster_size, tf.reduce_sum(encodings, 0), self.decay)
+            dw = tf.matmul(flat_inputs, encodings, transpose_a=True)
+            updated_ema_w = moving_averages.assign_moving_average(self._ema_w, dw,
+                                                                  self.decay)
+            n = tf.reduce_sum(updated_ema_cluster_size)
+            updated_ema_cluster_size = (
+                (updated_ema_cluster_size + self.epsilon)
+                / (n + self.num_embeddings * self.epsilon) * n)
+
+            normalised_updated_ema_w = (
+                updated_ema_w / tf.reshape(updated_ema_cluster_size, [1, -1]))
+            with tf.control_dependencies([e_latent_loss]):
+                update_w = tf.assign(self._w, normalised_updated_ema_w)
+                with tf.control_dependencies([update_w]):
+                    loss = self.commitment_cost * e_latent_loss
+
+        else:
+            loss = self.commitment_cost * e_latent_loss
+        quantized = inputs + tf.stop_gradient(quantized - inputs)
+        avg_probs = tf.reduce_mean(encodings, 0)
+        perplexity = tf.exp(- tf.reduce_sum(avg_probs * tf.log(avg_probs + 1e-10)))
+
+        return [quantized, loss, encodings]
+        
+    def compute_output_shape(self, input_shape):
+        return [input_shape, (1, ), input_shape]
+
+class VectorQuantizerEMA(Layer):
+    def __init__(self, num_embeddings=512, embedding_dim=64, commitment_cost=0.25, decay=0.99, epsilon=1e-5, temp=0.001, training=True):
+        super(VectorQuantizerEMA, self).__init__()
+        self.embedding_dim = embedding_dim
+        self.num_embeddings = num_embeddings
+        self.commitment_cost = K.constant(commitment_cost, dtype='float32', shape=(1, ))
+        self.decay = decay
+        self.epsilon = epsilon
+        self.training = training
+        self.temp = temp
+    
+    def build(self, input_shape):
+        self.embedding = self.add_weight('word_embeddings',
+                                         shape=(self.num_embeddings, self.embedding_dim),
+                                         initializer=initializers.RandomNormal(0, 1))
+
+        self.ema_w = self.add_weight('ema_w',
+                                     shape=(self.num_embeddings, self.embedding_dim),
+                                     initializer=initializers.RandomNormal(0, 1))
+        self.ema_cluster_size = self.add_weight('ema_cluster_size',
+                                             (self.num_embeddings, ),
+                                             initializer='zeros')
+        super(VectorQuantizerEMA, self).build(input_shape)
+
+    def call(self, inputs, **kwargs):
+        # Flatten input
+        flat_input = K.reshape(inputs, (-1, self.embedding_dim))
+        
+        # Calculate distances
+        distances = (K.sum(flat_input**2, axis=1, keepdims=True) 
+                    + K.sum(self.embedding**2, axis=1)
+                    - 2 * K.dot(flat_input, K.transpose(self.embedding)))
+            
+        # Encoding
+        '''
+        encodings = tf.contrib.distributions.RelaxedOneHotCategorical(self.temp, logits=-distances)
+        encodings = encodings.sample()
+        idx_finder = K.variable(np.arange(K.int_shape(encodings)[-1]))
+        idx_finder = K.expand_dims(idx_finder, axis=0)
+        idx_finder = K.tile(idx_finder, (K.shape(encodings)[0], 1))
+        encoding_indices = K.dot(encodings, idx_finder)
+        encoding_indices = K.cast(encoding_indices, dtype='int32')
+        encoding_indices = K.reshape(encoding_indices, K.shape(inputs)[:-1])
+
+        '''
+        encoding_indices = K.argmin(distances, axis=1)
+        encodings = K.one_hot(encoding_indices, self.num_embeddings)
+        encoding_indices = K.reshape(encoding_indices, K.shape(inputs)[:-1])
+        
+        # Quantize embeddings
+        w = K.transpose(self.embedding)
+        quantized = tf.nn.embedding_lookup(w, encoding_indices, validate_indices=False)
+        e_latent_loss = K.mean((K.stop_gradient(quantized) - inputs) ** 2)
+        #e_latent_loss = K.mean((quantized - inputs) ** 2)
+        
+        if self.training:
+            K.moving_average_update(self.ema_cluster_size, K.sum(encodings, axis=0), self.decay)
+            dw = K.dot(K.transpose(flat_input), encodings)
+            K.moving_average_update(self.ema_w, dw, self.decay)
+            n = K.sum(self.ema_cluster_size)
+            updated_ema_cluster_size = (
+                (self.ema_cluster_size + self.epsilon)
+                / (n + self.num_embeddings * self.epsilon) * n)
+
+            normalised_updated_ema_w = (
+                self.ema_w / K.reshape(updated_ema_cluster_size, (1, -1)))
+            #with tf.control_dependencies([e_latent_loss]):
+            update_w = K.update(self.embedding, normalised_updated_ema_w)
+                #with tf.control_dependencies([update_w]):
+            loss = self.commitment_cost * e_latent_loss
+
+        else:
+            loss = self.commitment_cost * e_latent_loss
+        quantized = inputs + K.stop_gradient(quantized - inputs)
+        #quantized = inputs + (quantized - inputs)
+        #avg_probs = K.mean(encodings, axis=0)
+        #perplexity = K.exp(- K.sum(avg_probs * K.log(avg_probs + 1e-10)))
+
+        return [quantized, loss]
+        
+    def compute_output_shape(self, input_shape):
+        return [input_shape, (1, )]
 
 class NoiseLayer(Layer):
     def __init__(self, **kwargs):
@@ -414,7 +571,99 @@ class PixelNormalization(Layer):
     def compute_output_shape(self, input_shape):
         return input_shape
 
+class LayerNormalization(Layer):
 
+    def __init__(self,
+                 center=True,
+                 scale=True,
+                 epsilon=None,
+                 gamma_initializer='ones',
+                 beta_initializer='zeros',
+                 gamma_regularizer=None,
+                 beta_regularizer=None,
+                 gamma_constraint=None,
+                 beta_constraint=None,
+                 **kwargs):
+        """Layer normalization layer
+        See: [Layer Normalization](https://arxiv.org/pdf/1607.06450.pdf)
+        :param center: Add an offset parameter if it is True.
+        :param scale: Add a scale parameter if it is True.
+        :param epsilon: Epsilon for calculating variance.
+        :param gamma_initializer: Initializer for the gamma weight.
+        :param beta_initializer: Initializer for the beta weight.
+        :param gamma_regularizer: Optional regularizer for the gamma weight.
+        :param beta_regularizer: Optional regularizer for the beta weight.
+        :param gamma_constraint: Optional constraint for the gamma weight.
+        :param beta_constraint: Optional constraint for the beta weight.
+        :param kwargs:
+        """
+        super(LayerNormalization, self).__init__(**kwargs)
+        self.supports_masking = True
+        self.center = center
+        self.scale = scale
+        if epsilon is None:
+            epsilon = K.epsilon() * K.epsilon()
+        self.epsilon = epsilon
+        self.gamma_initializer = initializers.get(gamma_initializer)
+        self.beta_initializer = initializers.get(beta_initializer)
+        self.gamma_regularizer = regularizers.get(gamma_regularizer)
+        self.beta_regularizer = regularizers.get(beta_regularizer)
+        self.gamma_constraint = constraints.get(gamma_constraint)
+        self.beta_constraint = constraints.get(beta_constraint)
+        self.gamma, self.beta = None, None
+
+    def get_config(self):
+        config = {
+            'center': self.center,
+            'scale': self.scale,
+            'epsilon': self.epsilon,
+            'gamma_initializer': initializers.serialize(self.gamma_initializer),
+            'beta_initializer': initializers.serialize(self.beta_initializer),
+            'gamma_regularizer': regularizers.serialize(self.gamma_regularizer),
+            'beta_regularizer': regularizers.serialize(self.beta_regularizer),
+            'gamma_constraint': constraints.serialize(self.gamma_constraint),
+            'beta_constraint': constraints.serialize(self.beta_constraint),
+        }
+        base_config = super(LayerNormalization, self).get_config()
+        return dict(list(base_config.items()) + list(config.items()))
+
+    def compute_output_shape(self, input_shape):
+        return input_shape
+
+    def compute_mask(self, inputs, input_mask=None):
+        return input_mask
+
+    def build(self, input_shape):
+        self.input_spec = keras.engine.InputSpec(shape=input_shape)
+        shape = input_shape[-1:]
+        if self.scale:
+            self.gamma = self.add_weight(
+                shape=shape,
+                initializer=self.gamma_initializer,
+                regularizer=self.gamma_regularizer,
+                constraint=self.gamma_constraint,
+                name='gamma',
+            )
+        if self.center:
+            self.beta = self.add_weight(
+                shape=shape,
+                initializer=self.beta_initializer,
+                regularizer=self.beta_regularizer,
+                constraint=self.beta_constraint,
+                name='beta',
+            )
+        super(LayerNormalization, self).build(input_shape)
+
+    def call(self, inputs, training=None):
+        mean = K.mean(inputs, axis=-1, keepdims=True)
+        variance = K.mean(K.square(inputs - mean), axis=-1, keepdims=True)
+        std = K.sqrt(variance + self.epsilon)
+        outputs = (inputs - mean) / std
+        if self.scale:
+            outputs *= self.gamma
+        if self.center:
+            outputs += self.beta
+        return outputs
 
 ##########################
 ## Attention Layers

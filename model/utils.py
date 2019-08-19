@@ -11,11 +11,35 @@ import time
 from functools import partial
 import keras.backend as K
 from keras.utils import Sequence
+from PIL import Image
 #import colorgram
 
 ####################################################
 ## Loss functions
 ####################################################
+
+def reduce_var(x, axis=None, keepdims=False):
+    """Variance of a tensor, alongside the specified axis.
+
+    # Arguments
+        x: A tensor or variable.
+        axis: An integer, the axis to compute the variance.
+        keepdims: A boolean, whether to keep the dimensions or not.
+            If `keepdims` is `False`, the rank of the tensor is reduced
+            by 1. If `keepdims` is `True`,
+            the reduced dimension is retained with length 1.
+
+    # Returns
+        A tensor with the variance of elements of `x`.
+    """
+    m = tf.reduce_mean(x, axis=axis, keep_dims=True)
+    devs_squared = tf.square(x - m)
+    return tf.reduce_mean(devs_squared, axis=axis, keep_dims=keepdims)
+
+
+def vq_reconstruction_loss(y_true, y_pred, commitment_loss):
+    reconstruction_loss = tf.reduce_mean(tf.square(y_pred-y_true)) / reduce_var(y_true)
+    return reconstruction_loss + commitment_loss
 
 def hinge_real_discriminator_loss(y_true, y_pred):
     real_loss = tf.reduce_mean(tf.nn.relu(1.0 - y_pred))
@@ -111,6 +135,43 @@ def img_resize(img, y_dim, x_dim):
 def batch_resize(batch, dim):
     return np.stack([img_resize(img, dim, dim) for img in batch])
 
+def adjust_gamma(image, gamma=1.0):
+    invGamma = 1.0 / gamma
+    table = np.array([((i / 255.0) ** invGamma) * 255
+        for i in np.arange(0, 256)]).astype("uint8")
+    image = cv2.UMat(np.array(image, dtype=np.uint8))
+    image = cv2.LUT(image, table).get()
+    return image
+
+def convert_temp(image, temp):
+    image = Image.fromarray(image)
+    kelvin_table = {
+    1000: (255,56,0),
+    1500: (255,109,0),
+    2000: (255,137,18),
+    2500: (255,161,72),
+    3000: (255,180,107),
+    3500: (255,196,137),
+    4000: (255,209,163),
+    4500: (255,219,186),
+    5000: (255,228,206),
+    5500: (255,236,224),
+    6000: (255,243,239),
+    6500: (255,249,253),
+    7000: (245,243,255),
+    7500: (235,238,255),
+    8000: (227,233,255),
+    8500: (220,229,255),
+    9000: (214,225,255),
+    9500: (208,222,255),
+    10000: (204,219,255)}
+    r, g, b = kelvin_table[temp]
+    matrix = ( r / 255.0, 0.0, 0.0, 0.0,
+               0.0, g / 255.0, 0.0, 0.0,
+               0.0, 0.0, b / 255.0, 0.0 )
+    image = np.array(image.convert('RGB', matrix))
+    return image
+
 def crop_square_from_rec(img, img_dim=256):
     # resize based on smallest axis
     smallest_axis = img.shape[:2].index(min(img.shape[:2]))
@@ -133,8 +194,17 @@ def crop_square_from_rec(img, img_dim=256):
     return img
 
 def card_crop(img_path, img_dim=256):
-    img = cv2.imread(img_path)
-    orig_shape = img.shape
+    img = cv2.imread(img_path)[:, :, ::-1]
+    # randomly decide gamma and warmth augmentations
+    change_warmth = np.random.randint(2)
+    if change_warmth == 0:
+        warmth = random.choice([5000, 5500, 6000, 6500, 7000, 7500])
+        img = convert_temp(img, warmth)
+    change_gamma = np.random.randint(2)
+    if change_gamma == 0:
+        gamma = random.uniform(0.7, 1.3)
+        img = adjust_gamma(img, gamma)
+    ## image cropping and resizing
     # resize if too small
     if (img.shape[0] < img_dim) or (img.shape[1] < img_dim):
         img = crop_square_from_rec(img, img_dim=img_dim)
@@ -167,7 +237,6 @@ def card_crop(img_path, img_dim=256):
         img = img[:, ::-1, :]
 
     # normalize
-    img = img[:, :, ::-1]
     img = img/127.5
     img = img-1.0
     img = np.array(img).astype(np.float32)
@@ -383,90 +452,3 @@ class KerasImageGenerator(Sequence):
         x = np.array([card_crop(x_val, self.img_dim) for x_val in batch_x])
         
         return np.array(x), np.array(batch_y)
-'''
-class PaletteGenerator():
-    def __init__(self,
-                 img_dir,
-                 batch_size,
-                 n_cpu,
-                 n_palette,
-                 file_type=('.jpg', '.png', '.jpeg', '.mp4')):
-        self.img_dir = img_dir
-        self.file_type = file_type
-        self.batch_size = batch_size
-        self.n_cpu = n_cpu
-        self.n_palette = n_palette
-        self.queue = Queue(maxsize=self.n_cpu*4)
-        self.lock = Lock()
-        self.run = True
-        self.counter = Value('i', 0)
-        self.generate_data_paths()
-
-        for _ in range(self.n_cpu):
-             p = Process(target=self.fetch_batch)
-             p.start()
-
-    def generate_data_paths(self):
-        img_paths = []
-        for file in os.listdir(self.img_dir):
-            if file.endswith(self.file_type):
-                img_paths.append(os.path.join(self.img_dir, file))
-
-        # store paths and labels
-        self.df = pd.DataFrame({'paths':img_paths})
-        self.df.drop_duplicates(inplace=True)
-        if self.df.shape[0] % self.batch_size != 0:
-            self.n_batches = (self.df.shape[0]//self.batch_size) + 1
-        else:
-            self.n_batches = (self.df.shape[0]//self.batch_size)
-        self.indices = np.arange(self.n_batches)
-
-    def fetch_batch(self):
-        while self.run:
-
-            while self.queue.full():
-                time.sleep(0.1)
-
-            self.lock.acquire()
-            idx = self.counter.value
-            self.counter.value += 1
-            if self.counter.value >= self.n_batches:
-                self.counter.value = 0
-                self.run = False
-            self.lock.release()
-
-            if idx != (self.n_batches-1):
-                positions = self.indices[idx*self.batch_size:(idx+1)*self.batch_size]
-            else:
-                positions = self.indices[idx*self.batch_size:]
-            file_batch = self.df['paths'].iloc[positions]
-            
-            palettes = []
-            for img_path in file_batch:
-                palette_objs = colorgram.extract(img_path, 
-                                                 self.n_palette)
-                dom_palette = [[color.rgb.r, color.rgb.g, color.rgb.b] for color in palette_objs]
-                n_results = len(dom_palette)
-                while len(dom_palette) < self.n_palette:
-                    idx = np.random.randint(n_results)
-                    dom_palette.append(dom_palette[idx])
-                dom_palette = np.array(dom_palette)
-                palettes.append(dom_palette)
-            
-            palettes = np.array(palettes)
-
-            if palettes.shape == (len(file_batch), self.n_palette, 3):
-                self.queue.put((palettes, file_batch.values))
-
-    def next(self):
-        while self.queue.empty():
-            time.sleep(0.1)
-        return self.queue.get()
-
-    def shuffle(self):
-        self.df = self.df.sample(frac=1.0).reset_index(drop=True)
-
-    def end(self):
-        self.run = False
-        self.queue.close()
-'''

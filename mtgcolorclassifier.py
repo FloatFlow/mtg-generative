@@ -10,7 +10,9 @@ from keras.callbacks import ModelCheckpoint
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 import colorgram
-from model.utils import PaletteGenerator
+from multiprocessing import Process, Queue, Lock, Value
+import time
+from functools import partial
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Parameters for small CNN')
@@ -36,10 +38,10 @@ def parse_args():
                         default='logging/model_saves/mtg_palette_classifier/mtg_color_classifier_8colors.h5')
     parser.add_argument('--labeling_dir',
                         type=str,
-                        default='data/test_labeling')
+                        default='data/imaginaryreddit_images')
     parser.add_argument('--n_cpu',
                         type=int,
-                        default=3)
+                        default=4)
 
     return parser.parse_args()
 
@@ -58,6 +60,86 @@ def onehot_label_decoder(one_hot_label):
         if (i == 4) and (label == 1):
             str_label.append('R')
     return str(str_label)
+
+class PaletteGenerator():
+    def __init__(self,
+                 img_dir,
+                 batch_size,
+                 n_cpu,
+                 n_palette,
+                 file_type=('.jpg', '.png', '.jpeg')):
+        self.img_dir = img_dir
+        self.file_type = file_type
+        self.batch_size = batch_size
+        self.n_cpu = n_cpu
+        self.n_palette = n_palette
+        self.queue = Queue(maxsize=self.n_cpu*4)
+        self.lock = Lock()
+        self.run = True
+        self.counter = Value('i', -1)
+        self.generate_data_paths()
+
+        for _ in range(self.n_cpu):
+             p = Process(target=self.fetch_batch)
+             p.start()
+
+    def generate_data_paths(self):
+        img_paths = []
+        for file in os.listdir(self.img_dir):
+            if file.endswith(self.file_type):
+                img_paths.append(os.path.join(file))
+
+        # store paths and labels
+        self.df = pd.DataFrame({'paths':img_paths})
+        self.df.drop_duplicates(inplace=True)
+        if self.df.shape[0] % self.batch_size != 0:
+            self.n_batches = (self.df.shape[0]//self.batch_size) + 1
+        else:
+            self.n_batches = (self.df.shape[0]//self.batch_size)
+        self.indices = np.arange(self.df.shape[0])
+
+    def fetch_batch(self):
+        while self.run:
+
+            while self.queue.full():
+                time.sleep(0.1)
+
+            self.lock.acquire()
+            self.counter.value += 1
+            if self.counter.value >= self.n_batches:
+                self.counter.value = 0
+            end_position = min((self.counter.value+1)*self.batch_size, len(self.indices))
+            positions = self.indices[self.counter.value*self.batch_size:end_position]
+            self.lock.release()
+            file_batch = self.df['paths'].iloc[positions].values
+            
+            palettes = []
+            for img_path in file_batch:
+                palette_objs = colorgram.extract(os.path.join(self.img_dir, img_path), 
+                                                 self.n_palette)
+                dom_palette = [[color.rgb.r, color.rgb.g, color.rgb.b] for color in palette_objs]
+                n_results = len(dom_palette)
+                while len(dom_palette) < self.n_palette:
+                    idx = np.random.randint(n_results)
+                    dom_palette.append(dom_palette[idx])
+                dom_palette = np.array(dom_palette)
+                palettes.append(dom_palette)
+            
+            palettes = np.array(palettes)
+
+            self.queue.put((palettes, file_batch))
+
+    def next(self):
+        while self.queue.empty():
+            time.sleep(0.1)
+        return self.queue.get()
+
+    def shuffle(self):
+        self.df = self.df.sample(frac=1.0).reset_index(drop=True)
+
+    def end(self):
+        self.run = False
+        self.queue.close()
 
 class MtgColorClassifier():
     def __init__(self,
@@ -114,6 +196,39 @@ class MtgColorClassifier():
                                                   self.val_y)
                                  )
 
+    def iter_label(self, labeling_dir):
+        img_paths = []
+
+        for root, dirnames, filenames in os.walk(labeling_dir):
+            for file in filenames:
+                if file.endswith(('.jpg', '.png', '.jpeg')):
+                    img_paths.append(os.path.join(root, file))
+        img_paths = list(set(img_paths))
+
+        pbar = tqdm(total=len(img_paths))
+        palettes = []
+        for img_path in img_paths:
+            palette_objs = colorgram.extract(img_path, self.n_palette)
+            dom_palette = [[color.rgb.r, color.rgb.g, color.rgb.b] for color in palette_objs]
+            n_results = len(dom_palette)
+            while len(dom_palette) < self.n_palette:
+                idx = np.random.randint(n_results)
+                dom_palette.append(dom_palette[idx])
+            dom_palette = np.array(dom_palette)
+            
+            y_pred = self.model.predict(np.expand_dims(dom_palette, axis=0))
+            y_pred = np.where(y_pred > 0.5, 1, 0)
+            y_pred = [onehot_label_decoder(onehot_label) for onehot_label in y_pred]
+            new_fname = '{}_{}.png'.format(os.path.basename(img_path).split('.')[0], str(y_pred[0]))
+            try:
+                os.rename(img_path,
+                          os.path.join(os.path.dirname(img_path), new_fname))
+            except FileExistsError:
+                print('{} Already Renamed'.format(new_fname))
+                continue
+            pbar.update()
+        pbar.close()
+
     def label(self, batch_size, labeling_dir, n_cpu):
         n_batches = (len(list(os.listdir(labeling_dir)))//batch_size) + 1
         palette_generator = PaletteGenerator(labeling_dir,
@@ -134,7 +249,6 @@ class MtgColorClassifier():
 
             img_paths.append(img_names)
             predicted_labels.append(y_pred)
-            
             pbar.update()
         pbar.close()
 
@@ -142,10 +256,13 @@ class MtgColorClassifier():
         predicted_labels = [item for sublist in predicted_labels for item in sublist]
         rename_df = pd.DataFrame({'filename':img_paths, 'label':predicted_labels})
         rename_df.drop_duplicates(inplace=True)
+        rename_df['new_fname'] = ['{}_{}.png'.format(os.path.basename(fname).split('.')[0], label) \
+                                  for fname, label in zip(rename_df['filename'], rename_df['label'])]
+        rename_df.to_csv('mtg_palette_rename.csv')
         pbar = tqdm(total=rename_df.shape[0])
         for i, row in rename_df.iterrows():
-            new_fpath = '{}_{}.png'.format(row['filename'].split('.')[0], row['label'])
-            os.rename(row['filename'], new_fpath)
+            os.rename(os.path.join(labeling_dir, row['filename']),
+                      os.path.join(labeling_dir, row['new_fname']))
             pbar.update()
         pbar.close()
         
@@ -163,9 +280,10 @@ def main():
     if args.epochs > 0:
         colormodel.train(epochs=args.epochs)    
 
-    colormodel.label(batch_size=32,
-                     labeling_dir=args.labeling_dir,
-                     n_cpu=args.n_cpu)
+    #colormodel.label(batch_size=32,
+    #                 labeling_dir=args.labeling_dir,
+    #                 n_cpu=args.n_cpu)
+    colormodel.iter_label(labeling_dir=args.labeling_dir)
 
 if __name__ == '__main__':
     main()

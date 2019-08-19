@@ -16,7 +16,7 @@ from keras.utils import plot_model
 from functools import partial
 
 
-class StyleGAN():
+class StyleMiniGAN():
     def __init__(self, 
                  img_dim_x,
                  img_dim_y,
@@ -33,7 +33,7 @@ class StyleGAN():
                  testing_dir,
                  n_cpu,
                  n_noise_samples=16):
-        self.name = 'stylegan'
+        self.name = 'styleminigan'
         self.img_dim_x = img_dim_x
         self.img_dim_y = img_dim_y
         self.img_depth = img_depth
@@ -58,11 +58,12 @@ class StyleGAN():
         
         self.style_samples = np.random.normal(0, 0.8, size=(self.n_noise_samples, self.z_len))
         self.label_samples = label_generator(self.n_noise_samples, seed=42, n_classes=2)
-        self.model_name = 'stylegan'
+        self.model_name = 'styleminigan'
         self.latent_type = 'constant' # constant or learned
         self.gp_weight = 10 # is really gamma = 5 due to definition
         self.loss_type = 'hinge'
         self.kernel_init = VarianceScaling(scale=np.sqrt(2), mode='fan_in', distribution='normal')
+        self.activation = 'leaky'
 
 
     ###############################
@@ -75,7 +76,7 @@ class StyleGAN():
     1024    64
     2048    128
     '''
-    def build_generator(self, ch=128):
+    def build_generator(self, ch=256):
         style_in = Input(shape=(self.z_len, ))
         label_in = Input(shape=(self.n_classes, ))
         label_embed = Dense(self.n_classes, kernel_initializer=self.kernel_init)(label_in)
@@ -99,19 +100,39 @@ class StyleGAN():
         else:
             x = ConstantLatent()(latent_in)
 
-        x = style_generator_block(x, style, ch, kernel_init=self.kernel_init, upsample=False) #4x128
-        x = style_generator_block(x, style, ch, kernel_init=self.kernel_init) #8x128
-        x = style_generator_block(x, style, ch, kernel_init=self.kernel_init) #16x128
-        x = style_generator_block(x, style, ch, kernel_init=self.kernel_init) #32x128
-        ch = ch // 2
-        x = style_generator_block(x, style, ch, kernel_init=self.kernel_init) #64x64
-        ch = ch // 2
-        x = style_generator_block(x, style, ch,  kernel_init=self.kernel_init) #128x32
-        ch = ch // 2
-        x = style_generator_block(x, style, ch,  kernel_init=self.kernel_init) #256x16
+        x = styleres_generator_block(x, style, ch, kernel_init=self.kernel_init, activation=self.activation, upsample=False)
+        x = styleres_generator_block(x, style, ch, kernel_init=self.kernel_init, activation=self.activation, upsample=True)
+
+        x = styleres_generator_block(x, style, ch, kernel_init=self.kernel_init, activation=self.activation, upsample=False)
+        ch = ch//2
+        x = styleres_generator_block(x, style, ch, kernel_init=self.kernel_init, activation=self.activation, upsample=True)
+
+        x = styleres_generator_block(x, style, ch, kernel_init=self.kernel_init, activation=self.activation, upsample=False)
+        #ch = ch//2 # no downchannel in biggan
+        x = styleres_generator_block(x, style, ch, kernel_init=self.kernel_init, activation=self.activation, upsample=True)
+
+        x = styleres_generator_block(x, style, ch, kernel_init=self.kernel_init, activation=self.activation, upsample=False)
+        ch = ch//2
+        x = styleres_generator_block(x, style, ch, kernel_init=self.kernel_init, activation=self.activation, upsample=True)
+
+        x = Attention_2SN(ch)(x)
+
+        x = styleres_generator_block(x, style, ch, kernel_init=self.kernel_init, activation=self.activation, upsample=False)
+        ch = ch//2
+        x = styleres_generator_block(x, style, ch, kernel_init=self.kernel_init, activation=self.activation, upsample=True)
+
+        x = styleres_generator_block(x, style, ch, kernel_init=self.kernel_init, activation=self.activation, upsample=False)
+        ch = ch//2
+        x = styleres_generator_block(x, style, ch, kernel_init=self.kernel_init, activation=self.activation, upsample=True)
+
+        x = BatchNormalization()(x)
+        if self.activation == 'leaky':
+            x = LeakyReLU(0.2)(x)
+        else:
+            x = Activation('relu')(x)
 
         x = ConvSN2D(filters=3,
-                   kernel_size=1,
+                   kernel_size=3,
                    padding='same',
                    kernel_initializer=VarianceScaling(scale=1, mode='fan_in', distribution='normal'))(x)
         model_out = Activation('tanh')(x)
@@ -122,57 +143,62 @@ class StyleGAN():
             self.generator.summary(print_fn=lambda x: f.write(x + '\n'))
 
 
-    def build_discriminator(self, ch=16, kernel_init='he_normal'):
+    def build_discriminator(self, ch=16):
         img_in = Input(shape=(self.img_dim_x, self.img_dim_y, self.img_depth))
         class_in = Input(shape=(self.n_classes, ))
-        
         x = ConvSN2D(filters=ch,
-                   kernel_size=1,
-                   padding='same',
-                   kernel_initializer=self.kernel_init)(img_in)
-        x = LeakyReLU(0.2)(x)
-        x = ConvSN2D(filters=ch,
-                   kernel_size=3,
-                   padding='same',
-                   kernel_initializer=self.kernel_init)(x)
-        x = LeakyReLU(0.2)(x)
+                     kernel_size=3,
+                     strides=1,
+                     padding='same',
+                     use_bias=True,
+                     kernel_initializer=self.kernel_init)(img_in)
+        ch *= 2
+        x = styleres_discriminator_block(x, ch, kernel_init=self.kernel_init, activation=self.activation, downsample=True)
+        x = styleres_discriminator_block(x, ch, kernel_init=self.kernel_init, activation=self.activation, downsample=False)
 
         ch *= 2
-        x = style_discriminator_block(x, ch, kernel_init=self.kernel_init) #128x32
+        x = styleres_discriminator_block(x, ch, kernel_init=self.kernel_init, activation=self.activation, downsample=True)
+        x = styleres_discriminator_block(x, ch, kernel_init=self.kernel_init, activation=self.activation, downsample=False)
+
+        x = Attention_2SN(ch)(x)
+
         ch *= 2
-        x = style_discriminator_block(x, ch, kernel_init=self.kernel_init) #64x64
+        x = styleres_discriminator_block(x, ch, kernel_init=self.kernel_init, activation=self.activation, downsample=True)
+        x = styleres_discriminator_block(x, ch, kernel_init=self.kernel_init, activation=self.activation, downsample=False)
+
+        #ch *= 2 # no channel scaling in biggan
+        x = styleres_discriminator_block(x, ch, kernel_init=self.kernel_init, activation=self.activation, downsample=True)
+        x = styleres_discriminator_block(x, ch, kernel_init=self.kernel_init, activation=self.activation, downsample=False)
+
         ch *= 2
-        x = style_discriminator_block(x, ch, kernel_init=self.kernel_init) #32x128
-        x = style_discriminator_block(x, ch, kernel_init=self.kernel_init) #16x128
-        x = style_discriminator_block(x, ch, kernel_init=self.kernel_init) #8x128
-        x = style_discriminator_block(x, ch, kernel_init=self.kernel_init) #4x128
+        x = styleres_discriminator_block(x, ch, kernel_init=self.kernel_init, activation=self.activation, downsample=True)
+        x = styleres_discriminator_block(x, ch, kernel_init=self.kernel_init, activation=self.activation, downsample=False)
         x = MiniBatchStd()(x)
-        x = ConvSN2D(filters=ch,
-                   kernel_size=3,
-                   padding='valid',
-                   kernel_initializer=self.kernel_init)(x)
-        x = LeakyReLU(0.2)(x)
-        #x = GlobalAveragePooling2D()(x)
-        x = Flatten()(x)
-        x = Dense(units=ch, kernel_initializer=self.kernel_init)(x)
-        x = LeakyReLU(0.2)(x)
+        x = styleres_discriminator_block(x, ch, kernel_init=self.kernel_init, activation=self.activation, downsample=True)
+        x = styleres_discriminator_block(x, ch, kernel_init=self.kernel_init, activation=self.activation, downsample=False)
+
+        if self.activation == 'leaky':
+            x = LeakyReLU(0.2)(x)
+        else:
+            x = Activation('relu')(x)
+        x = GlobalSumPooling2D()(x)
 
         # architecture of tail stem
-        out = Dense(units=1, kernel_initializer=VarianceScaling(scale=1, mode='fan_in', distribution='normal'))(x)
-        y = Dense(units=1, kernel_initializer=VarianceScaling(scale=1, mode='fan_in', distribution='normal'))(class_in)
-
+        out = Dense(1)(x)
+        #print('Pooling shape: {}'.format(x.shape))
+        y = Dense(1, use_bias=True)(class_in)
+        #print('Embedding shape: {}'.format(y.shape))
         target_dim = x.shape[-1]
         y = Lambda(lambda x: K.tile(x, (1, target_dim)))(y)
         yh = Multiply()([y, x])
-        yh = Lambda(lambda x: K.sum(x, axis=1), output_shape=(1, ))(yh)
+        #yh = Lambda(lambda x: K.sum(x, axis=[1]), output_shape=(self.batch_size,))(yh)
+        yh = Lambda(lambda x: K.sum(x, axis=1), output_shape=(1,))(yh)
         model_out = Add()([out, yh])
 
         self.discriminator = Model([img_in, class_in], model_out)
         self.frozen_discriminator = Network([img_in, class_in], model_out)
 
         print(self.discriminator.summary())
-        with open('{}_architecture.txt'.format(self.name), 'a') as f:
-            self.discriminator.summary(print_fn=lambda x: f.write(x + '\n'))
 
     def build_model(self):
         d_optimizer = Adam(lr=self.d_lr, beta_1=0.0, beta_2=0.9)

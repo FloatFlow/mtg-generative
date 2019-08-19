@@ -2,8 +2,9 @@ import os
 import argparse
 import numpy as np
 import pandas as pd
-from keras.layers import BatchNormalization, Dense, Conv1D
-from keras.layers import Activation, Input, Flatten, LeakyReLU
+from PIL import Image
+from keras.layers import BatchNormalization, Dense, Conv2D
+from keras.layers import Activation, Input, Flatten, LeakyReLU, MaxPooling2D
 from keras.models import Model
 from keras.optimizers import SGD, Adam
 from keras.callbacks import ModelCheckpoint
@@ -25,7 +26,7 @@ def parse_args():
                         default=256)
     parser.add_argument('--batch_size',
                         type=int,
-                        default=32)
+                        default=16)
     parser.add_argument('--epochs',
                         type=int,
                         default=100)
@@ -53,27 +54,29 @@ class MtgImageClassifier():
         self.img_dim = img_dim
         self.build_model()
 
-    def build_model(self, ch=16):
-        #optimizer = SGD(lr=1e-4, momentum=0.9)
-        optimizer = Adam(lr=1e-4)
+    def build_model(self, ch=64):
+        optimizer = SGD(lr=1e-4, momentum=0.9)
+        #optimizer = Adam(lr=1e-4)
 
         model_in = Input(shape=(self.img_dim, self.img_dim, 3))
 
-        x = style_discriminator_block(model_in, ch, downsample=True, activation='relu') #128x128x16
-        ch *= 2
-        x = style_discriminator_block(x, ch, downsample=True, activation='relu') #64x64x32
-        ch *= 2
-        x = style_discriminator_block(x, ch, downsample=True, activation='relu') #32x32x64
-        ch *= 2
-        x = style_discriminator_block(x, ch, downsample=True, activation='relu') #16x16x128
-        ch *= 2
-        x = style_discriminator_block(x, ch, downsample=True, activation='relu') #8x8x256
-        ch *= 2
-        x = style_discriminator_block(x, ch, downsample=True, activation='relu') #4x4x512
-        ch *= 2
-        x = style_discriminator_block(x, ch, downsample=True, activation='relu') #2x2x1024
+        x = Conv2D(filters=ch,
+                   kernel_size=7,
+                   strides=2,
+                   padding='same')(model_in)
+        x = BatchNormalization()(x)
+        x = Activation('relu')(x)
+        x = MaxPooling2D(pool_size=3, strides=2, padding='same')(x) #64x64
 
-        x = Flatten()(x)
+        ch *= 2
+        x = res_block(x, ch, downsample=True) #32x32x64
+        ch *= 2
+        x = res_block(x, ch, downsample=True) #16x16x128
+        ch *= 2
+        x = res_block(x, ch, downsample=True) #8x8x256
+
+        #x = Flatten()(x)
+        x = GlobalAveragePooling2D()(x)
         x = Dense(5)(x)
         model_out = Activation('sigmoid')(x)
 
