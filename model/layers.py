@@ -4,168 +4,41 @@ from keras.layers import Layer, Dense, Conv2D, Conv2DTranspose, Embedding, Input
 import keras.backend as K
 #from keras.models import 
 import tensorflow as tf
-from keras import initializers
-from keras import regularizers
-from keras import constraints
+from keras.initializers import VarianceScaling
 from keras.utils import conv_utils
 import keras
 
 from tensorflow.python.training import moving_averages
 
-class TFVectorQuantizerEMA(Layer):
-    def __init__(self, num_embeddings=512, embedding_dim=64, commitment_cost=0.25, decay=0.99, epsilon=1e-5, training=True):
-        super(TFVectorQuantizerEMA, self).__init__()
-        self.embedding_dim = embedding_dim
-        self.num_embeddings = num_embeddings
-        self.commitment_cost = commitment_cost
-        self.decay = decay
-        self.epsilon = epsilon
-        self.training = training
+class VectorQuantizer(Layer):  
+    def __init__(self, k, **kwargs):
+        super(VectorQuantizer, self).__init__(**kwargs)
+        self.k = k
     
     def build(self, input_shape):
-        self._w = self.add_weight('word_embeddings',
-                                         shape=(self.num_embeddings, self.embedding_dim),
-                                         initializer=initializers.RandomNormal(0, 1))
-
-        self._ema_w = self.add_weight('ema_w',
-                                     shape=(self.num_embeddings, self.embedding_dim),
-                                     initializer=initializers.RandomNormal(0, 1))
-        self._ema_cluster_size = self.add_weight('ema_cluster_size',
-                                             (self.num_embeddings, ),
-                                             initializer='zeros')
-        super(TFVectorQuantizerEMA, self).build(input_shape)
-
-    def call(self, inputs, **kwargs):
-        input_shape = tf.shape(inputs)
-        with tf.control_dependencies([
-            tf.Assert(tf.equal(input_shape[-1], self.embedding_dim),
-                      [input_shape])]):
-            flat_inputs = tf.reshape(inputs, [-1, self.embedding_dim])
-
-        distances = (tf.reduce_sum(flat_inputs**2, 1, keepdims=True)
-                     - 2 * tf.matmul(flat_inputs, self._w)
-                     + tf.reduce_sum(self._w ** 2, 0, keepdims=True))
-
-        encoding_indices = tf.argmax(- distances, 1)
-        encodings = tf.one_hot(encoding_indices, self.num_embeddings)
-        encoding_indices = tf.reshape(encoding_indices, tf.shape(inputs)[:-1])
-        #quantized = self.quantize(encoding_indices)
-        with tf.control_dependencies([encoding_indices]):
-            w = tf.transpose(self._w, [1, 0])
-            quantized = tf.nn.embedding_lookup(w, encoding_indices, validate_indices=False)
-        e_latent_loss = tf.reduce_mean((tf.stop_gradient(quantized) - inputs) ** 2)
-
-        if self.training:
-            updated_ema_cluster_size = moving_averages.assign_moving_average(
-                self._ema_cluster_size, tf.reduce_sum(encodings, 0), self.decay)
-            dw = tf.matmul(flat_inputs, encodings, transpose_a=True)
-            updated_ema_w = moving_averages.assign_moving_average(self._ema_w, dw,
-                                                                  self.decay)
-            n = tf.reduce_sum(updated_ema_cluster_size)
-            updated_ema_cluster_size = (
-                (updated_ema_cluster_size + self.epsilon)
-                / (n + self.num_embeddings * self.epsilon) * n)
-
-            normalised_updated_ema_w = (
-                updated_ema_w / tf.reshape(updated_ema_cluster_size, [1, -1]))
-            with tf.control_dependencies([e_latent_loss]):
-                update_w = tf.assign(self._w, normalised_updated_ema_w)
-                with tf.control_dependencies([update_w]):
-                    loss = self.commitment_cost * e_latent_loss
-
-        else:
-            loss = self.commitment_cost * e_latent_loss
-        quantized = inputs + tf.stop_gradient(quantized - inputs)
-        avg_probs = tf.reduce_mean(encodings, 0)
-        perplexity = tf.exp(- tf.reduce_sum(avg_probs * tf.log(avg_probs + 1e-10)))
-
-        return [quantized, loss, encodings]
+        self.d = int(input_shape[-1])
+        self.codebook = self.add_weight(
+            shape=(self.k, self.d),
+            initializer=VarianceScaling(distribution="uniform"),
+            trainable=True,
+            name='codebook'
+            )
         
-    def compute_output_shape(self, input_shape):
-        return [input_shape, (1, ), input_shape]
-
-class VectorQuantizerEMA(Layer):
-    def __init__(self, num_embeddings=512, embedding_dim=64, commitment_cost=0.25, decay=0.99, epsilon=1e-5, temp=0.001, training=True):
-        super(VectorQuantizerEMA, self).__init__()
-        self.embedding_dim = embedding_dim
-        self.num_embeddings = num_embeddings
-        self.commitment_cost = K.constant(commitment_cost, dtype='float32', shape=(1, ))
-        self.decay = decay
-        self.epsilon = epsilon
-        self.training = training
-        self.temp = temp
+    def call(self, inputs):
+        # Map z_e of shape (b, w,, h, d) to indices in the codebook
+        lookup_ = tf.reshape(self.codebook, shape=(1, 1, 1, self.k, self.d))
+        z_e = tf.expand_dims(inputs, -2)
+        dist = tf.norm(z_e - lookup_, axis=-1)
+        k_index = tf.argmin(dist, axis=-1)
+        return k_index
     
-    def build(self, input_shape):
-        self.embedding = self.add_weight('word_embeddings',
-                                         shape=(self.num_embeddings, self.embedding_dim),
-                                         initializer=initializers.RandomNormal(0, 1))
-
-        self.ema_w = self.add_weight('ema_w',
-                                     shape=(self.num_embeddings, self.embedding_dim),
-                                     initializer=initializers.RandomNormal(0, 1))
-        self.ema_cluster_size = self.add_weight('ema_cluster_size',
-                                             (self.num_embeddings, ),
-                                             initializer='zeros')
-        super(VectorQuantizerEMA, self).build(input_shape)
-
-    def call(self, inputs, **kwargs):
-        # Flatten input
-        flat_input = K.reshape(inputs, (-1, self.embedding_dim))
-        
-        # Calculate distances
-        distances = (K.sum(flat_input**2, axis=1, keepdims=True) 
-                    + K.sum(self.embedding**2, axis=1)
-                    - 2 * K.dot(flat_input, K.transpose(self.embedding)))
-            
-        # Encoding
-        '''
-        encodings = tf.contrib.distributions.RelaxedOneHotCategorical(self.temp, logits=-distances)
-        encodings = encodings.sample()
-        idx_finder = K.variable(np.arange(K.int_shape(encodings)[-1]))
-        idx_finder = K.expand_dims(idx_finder, axis=0)
-        idx_finder = K.tile(idx_finder, (K.shape(encodings)[0], 1))
-        encoding_indices = K.dot(encodings, idx_finder)
-        encoding_indices = K.cast(encoding_indices, dtype='int32')
-        encoding_indices = K.reshape(encoding_indices, K.shape(inputs)[:-1])
-
-        '''
-        encoding_indices = K.argmin(distances, axis=1)
-        encodings = K.one_hot(encoding_indices, self.num_embeddings)
-        encoding_indices = K.reshape(encoding_indices, K.shape(inputs)[:-1])
-        
-        # Quantize embeddings
-        w = K.transpose(self.embedding)
-        quantized = tf.nn.embedding_lookup(w, encoding_indices, validate_indices=False)
-        e_latent_loss = K.mean((K.stop_gradient(quantized) - inputs) ** 2)
-        #e_latent_loss = K.mean((quantized - inputs) ** 2)
-        
-        if self.training:
-            K.moving_average_update(self.ema_cluster_size, K.sum(encodings, axis=0), self.decay)
-            dw = K.dot(K.transpose(flat_input), encodings)
-            K.moving_average_update(self.ema_w, dw, self.decay)
-            n = K.sum(self.ema_cluster_size)
-            updated_ema_cluster_size = (
-                (self.ema_cluster_size + self.epsilon)
-                / (n + self.num_embeddings * self.epsilon) * n)
-
-            normalised_updated_ema_w = (
-                self.ema_w / K.reshape(updated_ema_cluster_size, (1, -1)))
-            #with tf.control_dependencies([e_latent_loss]):
-            update_w = K.update(self.embedding, normalised_updated_ema_w)
-                #with tf.control_dependencies([update_w]):
-            loss = self.commitment_cost * e_latent_loss
-
-        else:
-            loss = self.commitment_cost * e_latent_loss
-        quantized = inputs + K.stop_gradient(quantized - inputs)
-        #quantized = inputs + (quantized - inputs)
-        #avg_probs = K.mean(encodings, axis=0)
-        #perplexity = K.exp(- K.sum(avg_probs * K.log(avg_probs + 1e-10)))
-
-        return [quantized, loss]
-        
-    def compute_output_shape(self, input_shape):
-        return [input_shape, (1, )]
+    def sample(self, k_index):
+        # Map indices array of shape (b, w, h) to actual codebook z_q
+        lookup_ = tf.reshape(self.codebook, shape=(1, 1, 1, self.k, self.d))
+        k_index_one_hot = tf.one_hot(k_index, self.k)
+        z_q = lookup_ * k_index_one_hot[..., None]
+        z_q = tf.reduce_sum(z_q, axis=-2)
+        return z_q
 
 class NoiseLayer(Layer):
     def __init__(self, **kwargs):
@@ -211,37 +84,40 @@ class LowPassFilter2D(Layer):
             self.kernel = K.constant([[0.1, 0.1, 0.1],
                                       [0.1, 0.2, 0.1],
                                       [0.1, 0.1, 0.1]])
-        elif self.kernel_size == 4:
-            numpy_kernel = [[1, 1, 1, 1],
-                            [1, 3, 3, 1],
-                            [1, 3, 3, 1],
-                            [1, 1, 1, 1]]
-            numpy_kernel = numpy_kernel/np.sum(numpy_kernel)
-            self.kernel = K.constant(numpy_kernel)
-        elif serlf.kernel_size == 5:
-            numpy_kernel = [[1, 1, 1, 1, 1],
-                            [1, 4, 4, 4, 1],
-                            [1, 4, 6, 4, 1],
-                            [1, 4, 4, 4, 1],
-                            [1, 1, 1, 1, 1]]
             numpy_kernel = numpy_kernel/np.sum(numpy_kernel)
             self.kernel = K.constant(numpy_kernel)
         else:
             raise ValueError('LowPassFilter2D only implements kernel sizes of 2, 3, 4, or 5.')
         super(LowPassFilter2D, self).build(input_shape)
 
-    def call(self, inputs):
+    
+    def blur2d(self, x, flip=False):
         n_channels = K.int_shape(inputs)[-1]
         kernel = K.expand_dims(self.kernel, axis=-1)
         kernel = K.expand_dims(kernel, axis=-1)
         kernel = K.tile(kernel, (1, 1, n_channels, 1))
-        convolved = K.depthwise_conv2d(inputs,
-                                       kernel,
-                                       strides=(1, 1),
-                                       padding='same',
-                                       data_format='channels_last',
-                                       dilation_rate=(1, 1))
+        convolved = K.depthwise_conv2d(
+            inputs,
+            kernel,
+            strides=(1, 1),
+            padding='same',
+            data_format='channels_last',
+            dilation_rate=(1, 1)
+            )
+        if flip:
+            convolved = convolved[:, :, ::-1, :]
         return convolved
+
+    def call(self, inputs):
+        @tf.custom_gradient
+        def func(x):
+            y = self.blur2d(x)
+            @tf.custom_gradient
+            def grad(dy):
+                dx = _blur2d(dy, flip=True)
+                return dx, lambda ddx: self.blur2d(ddx)
+            return y, grad
+        return func(inputs)
 
     def compute_output_shape(self, input_shape):
         return input_shape

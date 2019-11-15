@@ -77,6 +77,28 @@ def gradient_penalty_loss(y_true, y_pred, averaged_samples, weight=1):
     # Penalize the gradient norm
     return K.mean(gradient_penalty * weight)
 
+def vq_latent_loss(y_true, y_pred, beta=1, sample_weights=1):
+    y_true = None
+    latent_dim = K.int_shape(y_pred)[-1]//2
+    z_e = y_pred[..., :latent_dim]
+    z_q = y_pred[..., latent_dim:]
+    vq_loss = tf.reduce_mean((tf.stop_gradient(z_e) - z_q)**2)
+    commit_loss = tf.reduce_mean((z_e - tf.stop_gradient(z_q))**2)
+    latent_loss = tf.identity(vq_loss + BETA * commit_loss, name="latent_loss")
+    return latent_loss
+
+def zq_norm(y_true, y_pred):
+    del y_true
+    latent_dim = K.int_shape(y_pred)[-1]//2
+    z_q = y_pred[..., latent_dim:]
+    return tf.reduce_mean(tf.norm(z_q, axis=-1))
+
+def ze_norm(y_true, y_pred):
+    del y_true
+    latent_dim = K.int_shape(y_pred)[-1]//2
+    z_e = y_pred[..., :latent_dim]
+    return tf.reduce_mean(tf.norm(z_e, axis=-1))   
+
 ####################################################
 ## Image Preprocessing and loading
 ####################################################
@@ -334,6 +356,7 @@ class CardGenerator():
             self.counter.value += 1
             if self.counter.value >= self.n_batches:
                 self.counter.value = 0
+                self.shuffle()
             self.lock.release()
 
             try:
@@ -358,97 +381,3 @@ class CardGenerator():
         self.run = False
         self.queue.close()
 
-class MSGCardGenerator():
-    def __init__(self,
-                 img_dir,
-                 batch_size,
-                 n_cpu,
-                 img_dim,
-                 file_type=('.jpg', '.png', '.jpeg', '.mp4')):
-        self.img_dir = img_dir
-        self.img_dim = img_dim
-        self.file_type = file_type
-        self.batch_size = batch_size
-        self.n_cpu = n_cpu
-        self.queue = Queue(maxsize=self.n_cpu*4)
-        self.lock = Lock()
-        self.run = True
-        self.counter = Value('i', 0)
-        self.generate_data_paths()
-
-        for _ in range(self.n_cpu):
-             p = Process(target=self.fetch_batch)
-             p.start()
-
-    def generate_data_paths(self):
-        img_paths = []
-        img_labels = []
-        for file in os.listdir(self.img_dir):
-            if file.endswith(self.file_type):
-                img_paths.append(os.path.join(self.img_dir, file))
-                label = os.path.basename(file).split('.')[0].split('_')[-1]
-                img_labels.append(label)
-
-        # store paths and labels
-        self.df = pd.DataFrame({'paths':img_paths, 'labels':img_labels})
-        self.n_batches = (self.df.shape[0]//self.batch_size) - 1
-        self.indices = np.arange(self.n_batches)
-
-    def fetch_batch(self):
-        while self.run:
-
-            while self.queue.full():
-                time.sleep(0.1)
-
-            self.lock.acquire()
-            idx = self.counter.value
-            self.counter.value += 1
-            if self.counter.value >= self.n_batches:
-                self.counter.value = 0
-            self.lock.release()
-
-            try:
-                positions = self.indices[idx*self.batch_size:(idx+1)*self.batch_size]
-                numpy_batch = np.array([card_crop(img_path, self.img_dim) for img_path in self.df['paths'].iloc[positions]])
-                label_batch = np.array([onehot_label_encoder(label) for label in self.df['labels'].iloc[positions]])
-                gsm_numpy_batchs = [numpy_batch]
-                current_dim = self.img_dim
-                while current_dim >= 8:
-                    current_dim = current_dim//2
-                    gsm_numpy_batchs.append(batch_resize(numpy_batch, current_dim))
-
-                if numpy_batch.shape == (self.batch_size, self.img_dim, self.img_dim, 3):
-                    self.queue.put((gsm_numpy_batchs, label_batch))
-            except ValueError:
-                continue
-
-    def next(self):
-        while self.queue.empty():
-            time.sleep(0.1)
-        return self.queue.get()
-
-    def shuffle(self):
-        self.df = self.df.sample(frac=1.0).reset_index(drop=True)
-
-    def end(self):
-        self.run = False
-        self.queue.close()
-
-
-class KerasImageGenerator(Sequence):
-    def __init__(self, x, y, batch_size, img_dim):
-        self.x, self.y = x, y
-        self.batch_size = batch_size
-        self.img_dim = img_dim
-
-    def __len__(self):
-        return int(np.ceil(len(self.x) / float(self.batch_size)))
-
-    def __getitem__(self, idx):
-        batch_x = self.x[idx * self.batch_size:(idx + 1) * self.batch_size]
-        batch_y = self.y[idx * self.batch_size:(idx + 1) * self.batch_size]
-
-        # read your data here using the batch lists, batch_x and batch_y
-        x = np.array([card_crop(x_val, self.img_dim) for x_val in batch_x])
-        
-        return np.array(x), np.array(batch_y)

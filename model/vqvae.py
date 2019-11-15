@@ -45,145 +45,188 @@ class VQVAE():
             if not os.path.isdir(path):
                 os.makedirs(path)
         self.name = 'vqvae'
-        self.kernel_init = 'he_normal'
-        self.build_encoder()
-        self.build_decoder()
-
+        self.kernel_init = VarianceScaling(np.sqrt(2))
+        self.latent_dim = 256
+        self.activation = 'leaky'
+        self.k = 128
 
     ###############################
     ## All our architecture
     ###############################
 
-    def build_encoder(self, ch=16):
-        encoder_in = Input(shape=(self.img_dim_x, self.img_dim_y, self.img_depth))
+    def encoder_pass(self, inputs, ch=16):
+        x = style_discriminator_block(
+            inputs,
+            ch,
+            activation=self.activation,
+            upsample=False,
+            kernel_init=self.kernel_init
+            )
 
-        x = ConvSN2D(filters=ch,
-                     kernel_size=3,
-                     strides=1,
-                     padding='same',
-                     use_bias=True,
-                     kernel_initializer=self.kernel_init)(encoder_in)
-        ch *= 2
-        x = deep_biggan_discriminator_block(x, ch, downsample=True, bias=True) #128x32
+        while ch < self.latent_dim:
+            ch *= 2
+            x = style_discriminator_block(
+                x,
+                ch,
+                activation=self.activation,
+                kernel_init=self.kernel_init
+                )
+        while K.int_shape(x)[1] > 4:
+            x = style_discriminator_block(
+                x,
+                ch,
+                activation=self.activation,
+                kernel_init=self.kernel_init
+                )
+        x = Conv2D(
+            filters=self.latent_dim,
+            kernel_size=3,
+            padding='same',
+            kernel_initializer=self.kernel_init
+            )(x)
+        return x
 
-        ch *= 2
-        x = deep_biggan_discriminator_block(x, ch, downsample=True, bias=True) #64x64
-
-        #x = Attention_2SN(ch)(x) #64x64
-
-        quantized64, loss64 = VectorQuantizerEMA(num_embeddings=64, embedding_dim=64)(x)
-        ch *= 2
-        x = deep_biggan_discriminator_block(x, ch, downsample=True, bias=True) #32x128
-
-        quantized32, loss32 = VectorQuantizerEMA(num_embeddings=128, embedding_dim=128)(x)
-
-        loss = Add()([loss64, loss32])
-        #perplexity = Lambda(lambda x: K.sum(x[0], x[1]))([perplexity64, perplexity32])
-
-        self.encoder = Model(encoder_in, [quantized64, quantized32, loss])
-        print(self.encoder.summary())
-        with open('{}_architecture.txt'.format(self.name), 'w') as f:
-            self.encoder.summary(print_fn=lambda x: f.write(x + '\n'))
-
-    def build_decoder(self, ch=128):
-        img_in32 = Input(shape=(self.img_dim_x//8, self.img_dim_y//8, ch))
-
-        x = deep_simple_biggan_generator_block(img_in32, ch, upsample=False) #32x128
-        ch = ch//2
-        x = deep_simple_biggan_generator_block(x, ch, upsample=True) #64x64
-
-        #x = Attention_2SN(ch)(x) #64x64
-        
-        img_in64 = Input(shape=(self.img_dim_x//4, self.img_dim_y//4, ch))
-
-        x = Concatenate(axis=-1)([x, img_in64])
-        ch = ch//2
-        x = deep_simple_biggan_generator_block(x, ch, upsample=True) #128x32
-
-        ch = ch//2
-        x = deep_simple_biggan_generator_block(x, ch, upsample=True) #256x16
-
-        model_out = ConvSN2D(filters=3,
-                             kernel_size=3,
-                             strides=1,
-                             padding='same',
-                             use_bias=True,
-                             kernel_initializer=self.kernel_init,
-                             activation='tanh')(x)
-
-        self.decoder = Model([img_in32, img_in64], model_out)   
-        print(self.decoder.summary())
-        with open('{}_architecture.txt'.format(self.name), 'a') as f:
-            self.decoder.summary(print_fn=lambda x: f.write(x + '\n'))
+    def build_decoder(self, ch=256):
+        latent_in = Input((4, 4, self.latent_dim))
+        x = style_decoder_block(
+            latent_in,
+            ch,
+            activation=self.activation,
+            kernel_init=self.kernel_init
+            )
+        for _ in range(2):
+            x = style_decoder_block(
+                x,
+                ch,
+                activation=self.activation,
+                kernel_init=self.kernel_init
+                )
+        for _ in range(5):
+            ch = ch//2
+            x = style_decoder_block(
+                x,
+                ch,
+                activation=self.activation,
+                kernel_init=self.kernel_init
+                )
+        x = Conv2D(
+            filters=3,
+            kernel_size=3,
+            padding='same',
+            kernel_initializer=VarianceScaling(1)
+            )
+        decoder_out = Activation('tanh')(x)
+        self.decoder = Model(latent_in, decoder_out)
 
     def build_model(self):
-        pass
+        ## Encoder
+        encoder_inputs = Input(shape=(self.img_dim, self.img_dim, self.img_depth))
+        z_e = self.encoder_pass(encoder_inputs, self.latent_dim, num_layers=num_layers)
+        SIZE = int(z_e.get_shape()[1])
 
+        ## Vector Quantization
+        vector_quantizer = VectorQuantizer(self.k, name="vector_quantizer")
+        codebook_indices = vector_quantizer(z_e)
+        encoder = K.Model(inputs=encoder_inputs, outputs=codebook_indices, name='encoder')
+
+        ## Decoder already built
+    
+        ## VQVAE Model (training)
+        sampling_layer = Lambda(lambda x: vector_quantizer.sample(K.cast(x, "int32")), name="sample_from_codebook")
+        z_q = sampling_layer(codebook_indices)
+        codes = Concatenate(axis=-1)([z_e, z_q])
+        straight_through = Lambda(lambda x : x[1] + tf.stop_gradient(x[0] - x[1]), name="straight_through_estimator")
+        straight_through_zq = straight_through([z_q, z_e])
+        reconstructed = self.decoder(straight_through_zq)
+        self.vq_vae = Model(inputs=encoder_inputs, outputs=[reconstructed, codes], name='vq-vae')
+    
+        ## VQVAE model (inference)
+        codebook_indices = Input(shape=(SIZE, SIZE), name='discrete_codes', dtype=tf.int32)
+        z_q = sampling_layer(codebook_indices)
+        generated = self.decoder(z_q)
+        self.vq_vae_sampler = Model(inputs=codebook_indices, outputs=generated, name='vq-vae-sampler')
+        
+        ## Transition from codebook indices to model (for training the prior later)
+        indices = Input(shape=(SIZE, SIZE), name='codes_sampler_inputs', dtype='int32')
+        z_q = sampling_layer(indices)
+        self.codes_sampler = Model(inputs=indices, outputs=z_q, name="codes_sampler")
+        
+        ## Getter to easily access the codebook for vizualisation
+        indices = Input(shape=(), dtype='int32')
+        self.vector_model = Model(inputs=indices, outputs=vector_quantizer.sample(indices[:, None, None]), name='get_codebook')
+
+        # compile our models
+        opt = ADAM(self.lr, beta1=0.0, beta2=0.999)
+        self.vq_vae.compile(
+            optimizer=opt,
+            loss=['mse', partial(vq_latent_loss, beta=self.beta)],
+            metrics=[zq_norm, ze_norm]
+            )
+    
+    def get_vq_vae_codebook(self):
+        codebook = vector_model.predict(np.arange(k))
+        codebook = np.reshape(codebook, (k, d))
+        return codebook
 
     ###############################
     ## All our training, etc
     ###############################               
 
     def train(self, epochs):
-        sess = tf.Session()
-        K.set_session(sess)
-
-        card_generator = CardGenerator(img_dir=self.training_dir,
-                                       batch_size=self.batch_size,
-                                       n_cpu=self.n_cpu,
-                                       img_dim=self.img_dim_x)
+        card_generator = CardGenerator(
+            img_dir=self.training_dir,
+            batch_size=self.batch_size,
+            n_cpu=self.n_cpu,
+            img_dim=self.img_dim_x
+            )
         real_batch, real_labels = card_generator.next()
         self.selected_samples = real_batch[:16]
+            
+        n_batches = card_generator.n_batches
+        for epoch in range(epochs):
+            recon_accum = []
+            kl_accum = []
+            vq_accum = []
+            ve_accum = []
 
-        #img_in = Input(shape=(self.img_dim_x, self.img_dim_y, self.img_depth))
-        img_in = tf.placeholder(tf.float32, shape=(None, self.img_dim_x, self.img_dim_y, self.img_depth))
-        quantized64, quantized32, commitment_loss  = self.encoder(img_in)
-        reconstructed_img = self.decoder([quantized32, quantized64])
-        real_tensor = tf.placeholder(tf.float32, shape=(None, self.img_dim_x, self.img_dim_y, self.img_depth))
-        loss = vq_reconstruction_loss(real_tensor, img_in, commitment_loss)
-        tf.losses.add_loss(loss)
-        train_step = tf.train.AdamOptimizer(learning_rate=self.lr).minimize(loss)
+            pbar = tqdm(total=n_batches)
+            for batch_i in range(n_batches):
+                real_batch, real_labels = card_generator.next()
+                dummy = np.zeros((batch_size, 4, 4, self.latent_dim*2))
 
-        # Initialize all variables
-        init_op = tf.global_variables_initializer()
-        sess.run(init_op)
+                _, recon_loss, kl_loss, _, _, vqnorm, venorm, _ = self.vq_vae.train_on_batch(
+                    real_batch,
+                    [real_batch, dummy]
+                    )
+                recon_accum.append(recon_loss)
+                kl_accum.append(kl_loss)
+                vq_accum.append(vqnorm)
+                ve_accum.append(venorm)
 
-        # Run training loop
-        with sess.as_default():                
-            n_batches = card_generator.n_batches
-            for epoch in range(epochs):
-                loss_accum = []
+                pbar.update()
+            pbar.close()
 
-                pbar = tqdm(total=n_batches)
-                for batch_i in range(n_batches):
-                    real_batch, real_labels = card_generator.next()
-                    
-                    train_step.run(feed_dict={img_in: real_batch,
-                                              real_tensor: real_batch})
-                    #loss = K.eval(tf.losses.get_losses()[0])
-                    #loss = self.model.train_on_batch(real_batch, real_batch)
+            print('{}/{} --> recon loss: {}, kl loss: {}, z_q norm: {}, z_e norm: {}'.format(
+                epoch, 
+                epochs, 
+                np.mean(recon_accum),
+                np.mean(kl_accum),
+                np.mean(vq_accum),
+                np.mean(ve_accum))
+                )
 
-                    pbar.update()
-                pbar.close()
+            if epoch % self.save_freq == 0:
+                self.reconstruction_validation(epoch)
+                self.save_model_weights(epoch, np.mean(loss_accum))
 
-                print('{}/{} ----> loss: {}'.format(epoch, 
-                                                    epochs, 
-                                                    loss))
-
-                if epoch % self.save_freq == 0:
-                    self.reconstruction_validation(epoch)
-                    self.save_model_weights(epoch, loss)
-
-                card_generator.shuffle()
-
-            card_generator.end()                
-
+            card_generator.shuffle()
+        card_generator.end()
 
     def reconstruction_validation(self, epoch):
         print('Generating Images...')
         if not os.path.isdir(self.validation_dir):
             os.mkdir(self.validation_dir)
-        reconstructed_imgs = self.generator.predict(self.selected_samples)
+        reconstructed_imgs = self.vq_vae.predict(self.selected_samples)
         reconstructed_imgs = [((img+1)*127.5).astype(np.uint8) for img in reconstructed_imgs]
 
         # fill a grid
@@ -191,7 +234,6 @@ class VQVAE():
         img_grid = np.zeros(shape=(self.img_dim_x*grid_dim, 
                                    self.img_dim_y*grid_dim,
                                    self.img_depth))
-
 
         positions = itertools.product(range(grid_dim), range(grid_dim))
         for (x_i, y_i), img in zip(positions, reconstructed_imgs):
@@ -202,13 +244,6 @@ class VQVAE():
         img_grid = Image.fromarray(img_grid.astype(np.uint8))
         img_grid.save(os.path.join(self.validation_dir, "validation_img_{}.png".format(epoch)))
 
-
-    def noise_validation_wlabel(self):
-        pass
-
-    def predict_noise_wlabel_testing(self, label):
-        pass
-
     def save_model_weights(self, epoch, loss):
         if not os.path.isdir(self.checkpoint_dir):
             os.mkdir(self.checkpoint_dir)
@@ -216,7 +251,3 @@ class VQVAE():
         encoder_savename = os.path.join(self.checkpoint_dir, 'vqvae_encoder_weights_{}_{:.3f}.h5'.format(epoch, loss))
         self.decoder.save_weights(decoder_savename)
         self.encoder.save_weights(encoder_savename)
-
-    def load_model_weights(self, d_weight_path, e_weight_path):
-        self.decoder.load_weights(d_weight_path, by_name=True)
-        self.encoder.load_weights(e_weight_path, by_name=True)
