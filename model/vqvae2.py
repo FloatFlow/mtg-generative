@@ -4,23 +4,20 @@ import os
 import numpy as np
 from functools import partial
 from tqdm import tqdm
-import itertools
 
 from keras.layers import Dense, Reshape, Lambda, Multiply, Add, \
     Activation, UpSampling2D, AveragePooling2D, Input, \
-    Concatenate, Flatten, Conv2D, Conv2DTranspose
+    Concatenate, Flatten
 from keras.models import Model
 from keras.optimizers import Adam
-from keras.initializers import VarianceScaling
 import keras.backend as K
-import tensorflow as tf
-
-from model.utils import CardGenerator, vq_latent_loss, zq_norm, ze_norm
-from model.network_blocks import resblock_decoder, resblock_encoder
-from model.layers import VectorQuantizer
 
 
-class VQVAE():
+from model.utils import *
+from model.layers import *
+from model.network_blocks import *
+
+class VQVAE2():
     def __init__(self, 
                  img_dim_x,
                  img_dim_y,
@@ -53,9 +50,6 @@ class VQVAE():
         self.kernel_init = VarianceScaling(np.sqrt(2))
         self.latent_dim = 64
         self.k = 256
-        self.beta = 0.25
-        self.build_decoder()
-        self.build_model()
 
     ###############################
     ## All our architecture
@@ -67,32 +61,50 @@ class VQVAE():
                 ch,
                 downsample=False,
                 kernel_init=self.kernel_init
-                )
+                ) #256x16
 
-        while (K.int_shape(x)[1] > 32):
-            ch *= 2
-            x = resblock_encoder(
-                x,
-                ch,
-                kernel_init=self.kernel_init
-                )
+        ch *= 2
+        x = resblock_encoder(
+            x,
+            ch,
+            kernel_init=self.kernel_init
+            ) #128x32
 
-        x = Conv2D(
+        ch *= 2
+        x = resblock_encoder(
+            x,
+            ch,
+            kernel_init=self.kernel_init
+            ) #64x64
+        feat64 = Conv2D(
             filters=self.latent_dim,
             kernel_size=3,
             padding='same',
             kernel_initializer=self.kernel_init
             )(x)
-        return x
 
-    def build_decoder(self):
+        ch *= 2
+        x = resblock_encoder(
+            x,
+            ch,
+            kernel_init=self.kernel_init
+            ) #32x128
+        feat32 = Conv2D(
+            filters=self.latent_dim,
+            kernel_size=3,
+            padding='same',
+            kernel_initializer=self.kernel_init
+            )(x)
+        return (feat64, feat32)
+
+    def build_top_decoder(self):
         latent_in = Input((32, 32, self.latent_dim))
         ch = self.latent_dim
         x = resblock_decoder(
             latent_in,
             ch,
             kernel_init=self.kernel_init
-            )
+            ) #64x64
         
         ch = ch//2
         x = resblock_decoder(
@@ -112,28 +124,33 @@ class VQVAE():
             kernel_size=3,
             padding='same',
             kernel_initializer=VarianceScaling(1)
-            )(x)
+            )
         decoder_out = Activation('tanh')(x)
         self.decoder = Model(latent_in, decoder_out)
 
     def build_model(self):
         ## Encoder
         encoder_inputs = Input(shape=(self.img_dim_y, self.img_dim_x, self.img_depth))
-        z_e = self.encoder_pass(encoder_inputs)
+        z_e_64, z_e_32 = self.encoder_pass(encoder_inputs)
         SIZE = int(z_e.get_shape()[1])
 
         ## Vector Quantization
         vector_quantizer = VectorQuantizer(self.k, name="vector_quantizer")
         codebook_indices = vector_quantizer(z_e)
-        print(K.int_shape(codebook_indices))
-        encoder = Model(inputs=encoder_inputs, outputs=codebook_indices, name='encoder')
+        encoder = K.Model(inputs=encoder_inputs, outputs=codebook_indices, name='encoder')
 
-        ## Decoder already built
+        ## Decoder
+        latent_in = Input((32, 32, self.latent_dim))
+        ch = self.latent_dim
+        x = resblock_decoder(
+            latent_in,
+            self.latent_dim,
+            kernel_init=self.kernel_init
+            )(z_e_32)
     
         ## VQVAE Model (training)
         sampling_layer = Lambda(lambda x: vector_quantizer.sample(K.cast(x, "int32")), name="sample_from_codebook")
         z_q = sampling_layer(codebook_indices)
-        print(K.int_shape(z_q))
         codes = Concatenate(axis=-1)([z_e, z_q])
         straight_through = Lambda(lambda x : x[1] + tf.stop_gradient(x[0] - x[1]), name="straight_through_estimator")
         straight_through_zq = straight_through([z_q, z_e])
@@ -153,11 +170,10 @@ class VQVAE():
         
         ## Getter to easily access the codebook for vizualisation
         indices = Input(shape=(), dtype='int32')
-        vq_samples = Lambda(lambda x: vector_quantizer.sample(K.cast(x[:, None, None], "int32")))(indices)
-        self.vector_model = Model(inputs=indices, outputs=vq_samples, name='get_codebook')
+        self.vector_model = Model(inputs=indices, outputs=vector_quantizer.sample(indices[:, None, None]), name='get_codebook')
 
         # compile our models
-        opt = Adam(self.lr, beta_1=0.0, beta_2=0.999)
+        opt = ADAM(self.lr, beta1=0.0, beta2=0.999)
         self.vq_vae.compile(
             optimizer=opt,
             loss=['mse', partial(vq_latent_loss, beta=self.beta)],

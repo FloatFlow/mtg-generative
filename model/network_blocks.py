@@ -115,45 +115,6 @@ def style_discriminator_block(
 
     return x
 
-def style_generator_block(
-    inputs,
-    style,
-    output_dim,
-    upsample=True,
-    kernel_init='he_normal'
-    ):
-
-    # first conv block
-    if upsample:
-        x = UpSampling2D(2, interpolation='nearest')(inputs)
-        x = Conv2DTranspose(
-            filters=output_dim,
-            kernel_size=3,
-            strides=2,
-            padding='same',
-            kernel_initializer=kernel_init
-            )(inputs)
-        x = LowPassFilter2D()(x)
-    else:
-        x = Conv2D(
-            filters=output_dim,
-            kernel_size=3,
-            padding='same',
-            kernel_initializer=kernel_init
-            )(inputs)
-    x = epilogue_block(x, style, kernel_init=kernel_init)
-
-    # second conv block
-    x = Conv2D(
-        filters=output_dim,
-        kernel_size=3,
-        padding='same',
-        kernel_initializer=kernel_init
-        )(x)
-    x = epilogue_block(x, style, kernel_init=kernel_init)
-
-    return x
-
 def style_decoder_block(
     inputs,
     output_dim,
@@ -164,7 +125,6 @@ def style_decoder_block(
 
     # first conv block
     if upsample:
-        x = UpSampling2D(2, interpolation='nearest')(inputs)
         x = Conv2DTranspose(
             filters=output_dim,
             kernel_size=3,
@@ -353,3 +313,112 @@ def deep_simple_biggan_generator_block(x, ch, upsample=True, kernel_init='he_nor
     x = Add()([xl, xr])
     return x
 
+###############################################################################
+## Res Blocks
+###############################################################################
+
+def resblock_decoder(
+    inputs,
+    output_dim,
+    upsample=True,
+    kernel_init=VarianceScaling(np.sqrt(2))
+    ):
+    if upsample:
+        x_skip = Conv2DTranspose(
+            filters=output_dim,
+            kernel_size=3,
+            strides=2,
+            padding='same',
+            kernel_initializer=kernel_init
+            )(inputs)
+    else:
+        x_skip = Conv2D(
+            filters=output_dim,
+            kernel_size=1,
+            padding='same',
+            kernel_initializer=kernel_init
+            )(inputs)
+
+    # first conv block
+    if upsample:
+        x = Conv2DTranspose(
+            filters=output_dim,
+            kernel_size=3,
+            strides=2,
+            padding='same',
+            kernel_initializer=kernel_init
+            )(inputs)
+        x = LowPassFilter2D()(x)
+    else:
+        x = Conv2D(
+            filters=output_dim,
+            kernel_size=3,
+            padding='same',
+            kernel_initializer=kernel_init
+            )(inputs)
+    x = Activation('relu')(x)
+    #x = InstanceNormalization()(x)
+
+    # second conv block
+    x = Conv2D(
+        filters=output_dim,
+        kernel_size=3,
+        padding='same',
+        kernel_initializer=kernel_init
+        )(x)
+    x = Activation('relu')(x)
+    #x = InstanceNormalization()(x)
+
+    x = Add()([x_skip, x])
+    return x
+
+def resblock_encoder(
+    inputs,
+    output_dim,
+    downsample=True,
+    kernel_init=VarianceScaling(np.sqrt(2))
+    ):
+    if downsample:
+        x_skip = Conv2D(
+            filters=output_dim,
+            kernel_size=3,
+            strides=2,
+            padding='same',
+            kernel_initializer=kernel_init
+            )(inputs)
+    else:
+        x_skip = Conv2D(
+            filters=output_dim,
+            kernel_size=1,
+            padding='same',
+            kernel_initializer=kernel_init
+            )(inputs)
+
+    x = Conv2D(
+        filters=output_dim,
+        kernel_size=3,
+        padding='same',
+        kernel_initializer=kernel_init
+        )(inputs)
+    x = Activation('relu')(x)
+
+    if downsample:
+        x = LowPassFilter2D()(x)
+        x = Conv2D(
+            filters=output_dim,
+            kernel_size=3,
+            strides=2,
+            padding='same',
+            kernel_initializer=kernel_init
+            )(x)
+    else:
+        x = Conv2D(
+            filters=output_dim,
+            kernel_size=3,
+            padding='same',
+            kernel_initializer=kernel_init
+            )(x)
+    x = Activation('relu')(x)
+
+    x = Add()([x, x_skip])
+    return x

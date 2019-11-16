@@ -26,19 +26,22 @@ class VectorQuantizer(Layer):
         
     def call(self, inputs):
         # Map z_e of shape (b, w,, h, d) to indices in the codebook
-        lookup_ = tf.reshape(self.codebook, shape=(1, 1, 1, self.k, self.d))
-        z_e = tf.expand_dims(inputs, -2)
+        lookup_ = K.reshape(self.codebook, shape=(1, 1, 1, self.k, self.d))
+        z_e = K.expand_dims(inputs, -2)
         dist = tf.norm(z_e - lookup_, axis=-1)
-        k_index = tf.argmin(dist, axis=-1)
+        k_index = K.argmin(dist, axis=-1)
         return k_index
     
     def sample(self, k_index):
         # Map indices array of shape (b, w, h) to actual codebook z_q
-        lookup_ = tf.reshape(self.codebook, shape=(1, 1, 1, self.k, self.d))
-        k_index_one_hot = tf.one_hot(k_index, self.k)
+        lookup_ = K.reshape(self.codebook, shape=(1, 1, 1, self.k, self.d))
+        k_index_one_hot = K.one_hot(k_index, self.k)
         z_q = lookup_ * k_index_one_hot[..., None]
         z_q = tf.reduce_sum(z_q, axis=-2)
         return z_q
+
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], input_shape[1], input_shape[2])
 
 class NoiseLayer(Layer):
     def __init__(self, **kwargs):
@@ -78,20 +81,17 @@ class LowPassFilter2D(Layer):
 
     def build(self, input_shape):
         if self.kernel_size == 2:
-            self.kernel = K.constant([[0.25, 0.25,],
-                                      [0.25, 0.25,]])
-        elif self.kernel_size == 3:
-            self.kernel = K.constant([[0.1, 0.1, 0.1],
-                                      [0.1, 0.2, 0.1],
-                                      [0.1, 0.1, 0.1]])
-            numpy_kernel = numpy_kernel/np.sum(numpy_kernel)
-            self.kernel = K.constant(numpy_kernel)
+            self.kernel = np.array([[1, 1],
+                                    [1, 1]])
         else:
-            raise ValueError('LowPassFilter2D only implements kernel sizes of 2, 3, 4, or 5.')
+            self.kernel = np.array([[1, 1, 1],
+                                    [1, 2, 1],
+                                    [1, 1, 1]])
+        self.kernel = self.kernel/np.sum(self.kernel)
+        self.kernel = K.constant(self.kernel)
         super(LowPassFilter2D, self).build(input_shape)
-
     
-    def blur2d(self, x, flip=False):
+    def blur2d(self, inputs, flip=False):
         n_channels = K.int_shape(inputs)[-1]
         kernel = K.expand_dims(self.kernel, axis=-1)
         kernel = K.expand_dims(kernel, axis=-1)
@@ -213,6 +213,80 @@ class MiniBatchStd(Layer):
         return (input_shape[0], input_shape[1], input_shape[2], input_shape[3]+self.n_new_features)
 
 #Input b and g should be 1x1xC
+class InstanceNormalization(Layer):
+    def __init__(self, 
+             axis=-1,
+             momentum=0.99,
+             epsilon=1e-3,
+             center=True,
+             scale=True,
+             **kwargs):
+        super(InstanceNormalization, self).__init__(**kwargs)
+        self.axis = axis
+        self.momentum = momentum
+        self.epsilon = epsilon
+        self.center = center
+        self.scale = scale
+    
+    
+    def build(self, input_shape):
+        ndim = len(input_shape)
+        if self.axis == 0:
+            raise ValueError('Axis cannot be zero')
+        if (self.axis is not None) and (ndim == 2):
+            raise ValueError('Cannot specify axis for rank 1 tensor')
+        self.input_spec = InputSpec(ndim=ndim)
+        if self.axis is None:
+            shape = (1,)
+        else:
+            shape = (input_shape[self.axis],)
+
+        self.gamma = self.add_weight(
+            shape=shape,
+            name='gamma',
+            initializer='ones'
+            )
+
+        self.beta = self.add_weight(
+            shape=shape,
+            name='beta',
+            initializer='zeros'
+            )
+
+        self.built = True
+        super(InstanceNormalization, self).build(input_shape) 
+    
+    def call(self, inputs, training=None):
+        input_shape = K.int_shape(inputs)
+        reduction_axes = list(range(1, len(input_shape)))
+        if self.axis is not None:
+            del reduction_axes[self.axis]
+        del reduction_axes[0]
+
+        mean = K.mean(inputs, reduction_axes, keepdims=True)
+        stddev = K.std(inputs, reduction_axes, keepdims=True) + self.epsilon
+        
+        broadcast_gamma = K.reshape(self.gamma, broadcast_shape)
+        broadcast_beta = K.reshape(self.beta, broadcast_shape)
+        normed = (normed * broadcast_gamma) + broadcast_beta
+
+        return normed
+    
+    def get_config(self):
+        config = {
+            'axis': self.axis,
+            'momentum': self.momentum,
+            'epsilon': self.epsilon,
+            'center': self.center,
+            'scale': self.scale
+        }
+        base_config = super(AdaInstanceNormalization, self).get_config()
+        return dict(list(base_config.items()) + list(config.items()))
+    
+    def compute_output_shape(self, input_shape):
+        return input_shape
+
+#Input b and g should be 1x1xC
 class AdaInstanceNormalization(Layer):
     def __init__(self, 
              axis=-1,
@@ -230,7 +304,7 @@ class AdaInstanceNormalization(Layer):
     
     
     def build(self, input_shape):
-    
+        
         dim = input_shape[0][self.axis]
         if dim is None:
             raise ValueError('Axis ' + str(self.axis) + ' of '

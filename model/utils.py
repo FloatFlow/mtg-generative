@@ -84,7 +84,7 @@ def vq_latent_loss(y_true, y_pred, beta=1, sample_weights=1):
     z_q = y_pred[..., latent_dim:]
     vq_loss = tf.reduce_mean((tf.stop_gradient(z_e) - z_q)**2)
     commit_loss = tf.reduce_mean((z_e - tf.stop_gradient(z_q))**2)
-    latent_loss = tf.identity(vq_loss + BETA * commit_loss, name="latent_loss")
+    latent_loss = tf.identity(vq_loss + beta * commit_loss, name="latent_loss")
     return latent_loss
 
 def zq_norm(y_true, y_pred):
@@ -135,24 +135,10 @@ def card_batch_collector(dir, batch_size, seed, file_type='.jpg'):
 
     return zipped_batches
 
-def image_normalize_read(img_path, img_dim):
-    img = cv2.imread(img_path)
-    img = cv2.resize(img, (img_dim, img_dim))
-    img = img[:,:,::-1]
-    img = img/127.5
-    img -= 1
-    return img
-
 def img_resize(img, y_dim, x_dim):
-    if img.shape[0]*img.shape[1] < y_dim*x_dim:
-        img = cv2.resize(img,
-                         (y_dim, x_dim),
-                         interpolation=cv2.INTER_CUBIC)
-    else:
-        img = cv2.resize(img,
-                         (y_dim, x_dim),
-                         interpolation=cv2.INTER_AREA)
-    return img
+    img = Image.fromarray(img)
+    img = img.resize((y_dim, x_dim), Image.LANCZOS)
+    return np.array(img)
 
 def batch_resize(batch, dim):
     return np.stack([img_resize(img, dim, dim) for img in batch])
