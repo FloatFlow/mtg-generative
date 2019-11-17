@@ -5,6 +5,10 @@ from keras.initializers import RandomNormal, VarianceScaling
 from model.layers import *
 
 
+###############################################################################
+## StyleGAN
+###############################################################################
+
 def adainstancenorm_zproj(x, z):
     target_shape = K.int_shape(x)
     gamma = Dense(units=target_shape[-1],
@@ -19,10 +23,6 @@ def adainstancenorm_zproj(x, z):
 
     x = AdaInstanceNormalization()([x, beta, gamma])
     return x
-
-###############################################################################
-## StyleGAN
-###############################################################################
 
 def epilogue_block(inputs,
                    style,
@@ -113,51 +113,6 @@ def style_discriminator_block(
     else:
         x = LeakyReLU(0.2)(x)
 
-    return x
-
-def style_decoder_block(
-    inputs,
-    output_dim,
-    upsample=True,
-    kernel_init='he_normal',
-    activation='relu'
-    ):
-
-    # first conv block
-    if upsample:
-        x = Conv2DTranspose(
-            filters=output_dim,
-            kernel_size=3,
-            strides=2,
-            padding='same',
-            kernel_initializer=kernel_init
-            )(inputs)
-        x = LowPassFilter2D()(x)
-    else:
-        x = Conv2D(
-            filters=output_dim,
-            kernel_size=3,
-            padding='same',
-            kernel_initializer=kernel_init
-            )(inputs)
-    if activation == 'leaky':
-        x = LeakyReLU(0.2)(x)
-    else:
-        x = Activation('relu')(x)
-    x = InstanceNormalization()(x)
-
-    # second conv block
-    x = Conv2D(
-        filters=output_dim,
-        kernel_size=3,
-        padding='same',
-        kernel_initializer=kernel_init
-        )(x)
-    if activation == 'leaky':
-        x = LeakyReLU(0.2)(x)
-    else:
-        x = Activation('relu')(x)
-    x = InstanceNormalization()(x)
     return x
 
 
@@ -259,50 +214,6 @@ def deep_biggan_discriminator_block(x, ch, downsample=True, kernel_init='he_norm
     xr = Activation('relu')(xr)
     if downsample:
         xr = AveragePooling2D((2,2))(xr)
-    xr = ConvSN2D(filters=ch,
-                  kernel_size=1,
-                  strides=1,
-                  padding='same',
-                  use_bias=bias,
-                  kernel_initializer=kernel_init)(xr)
-
-    x = Add()([xl, xr])
-    return x
-
-def deep_simple_biggan_generator_block(x, ch, upsample=True, kernel_init='he_normal', bias=True):
-    # left path
-    xl = Lambda(lambda x: x[:, :, :, :ch])(x)
-    if upsample:
-        xl = UpSampling2D((2,2), interpolation='nearest')(xl)
-
-    # right path
-    xr = Activation('relu')(x)
-    xr = ConvSN2D(filters=ch//4,
-                  kernel_size=1,
-                  strides=1,
-                  padding='same',
-                  use_bias=bias,
-                  kernel_initializer=kernel_init)(xr)
-
-    xr = Activation('relu')(xr)
-    if upsample:
-        xr = UpSampling2D((2,2), interpolation='nearest')(xr)
-    xr = ConvSN2D(filters=ch//4,
-                  kernel_size=3,
-                  strides=1,
-                  padding='same',
-                  use_bias=bias,
-                  kernel_initializer=kernel_init)(xr)
-
-    xr = Activation('relu')(xr)
-    xr = ConvSN2D(filters=ch//4,
-                  kernel_size=3,
-                  strides=1,
-                  padding='same',
-                  use_bias=bias,
-                  kernel_initializer=kernel_init)(xr)
-
-    xr = Activation('relu')(xr)
     xr = ConvSN2D(filters=ch,
                   kernel_size=1,
                   strides=1,
@@ -422,3 +333,120 @@ def resblock_encoder(
 
     x = Add()([x, x_skip])
     return x
+
+###############################################################################
+## PixelCNN
+## Adopted from https://github.com/suga93/pixelcnn_keras/blob/master/core/layers.py
+###############################################################################
+
+def masked_conv(x, filter_size, stack_type, mask_type='B'):
+    if stack_type == 'vertical':
+        res = ZeroPadding2D(
+            padding=((filter_size[0]//2, 0), (filter_size[1]//2, filter_size[1]//2))
+            )(x)
+        res = Conv2D(
+            filters=2*self.n_filters,
+            kernel_size=(filter_size[0]//2+1, filter_size[1]),
+            padding='valid'
+            )(res)
+    elif stack_type == 'horizontal':
+        res = ZeroPadding2D(padding=((0, 0), (filter_size[1]//2, 0)))(x)
+        if mask_type == 'A':
+            res = Conv2D(
+                filters=2*self.n_filters,
+                kernel_size=(1, filter_size[1]//2),
+                padding='valid'
+                )(res)
+        else:
+            res = Conv2D(
+                filters=2*self.n_filters,
+                kernel_size=(1, filter_size[1]//2+1),
+                padding='valid'
+                )(res)
+    return res
+
+def shift_down(x):
+    x_shape = K.int_shape(x)
+    x = ZeroPadding2D(padding=((1, 0), (0, 0)))(x)
+    x = Lambda(lambda x: x[:, :x_shape[1], ...])(x)
+    return x
+
+def feed_v_map(x, n_filters=64):
+    ### shifting down feature maps
+    x = shift_down(x)
+    x = Conv2D(
+        filters=2*n_filters,
+        kernel_size=1,
+        padding='valid'
+        )(x)
+    return x
+
+def intro_pixelcnn_layer(x, filter_size=(3, 3), n_filters=64, h=None):
+    # first PixelCNN layer
+    ### (kxk) masked convolution can be achieved by (k//2+1, k) convolution and padding.
+    v_masked_map = masked_conv(
+        x,
+        filter_size=filter_size,
+        stack_type='vertical'
+        )
+    ### (i-1)-th vertical activation maps into the i-th hirizontal stack. (if i==0, vertical activation maps == input images)
+    v_feed_map = feed_v_map(v_masked_map, n_filters)
+    v_stack_out = GatedCNN(
+        n_filters=n_filters,
+        stack_type='vertical',
+        v_map=None,
+        h=h
+        )(v_masked_map)
+    ### (1xk) masked convolution can be achieved by (1 x k//2+1) convolution and padding.
+    h_masked_map = masked_conv(
+        x,
+        filter_size=filter_size,
+        stack_type='horizontal',
+        mask_type='A'
+        )
+    ### Mask A is applied to the first layer (achieved by cropping), and v_feed_maps are merged. 
+    h_stack_out = GatedCNN(
+        n_filters=n_filters,
+        stack_type='horizontal',
+        v_map=v_feed_map,
+        h=h,
+        crop_right=True
+        )(h_masked_map)
+    ### not residual connection in the first layer.
+    h_stack_out = Conv2D(
+        filters=n_filters,
+        kernel_size=1,
+        paddomg='valid'
+        )(h_stack_out)
+    return (v_stack_out, h_stack_out)
+
+def pixelcnn_layer(v_stack_in, h_stack_in, filter_size=(3, 3), n_filters=64, h=None):
+    v_masked_map = masked_conv(
+        v_stack_in,
+        filter_size, 
+        stack_type='vertical')
+    v_feed_map = feed_v_map(v_masked_map)
+    v_stack_out = GatedCNN(
+        n_filters,
+        stack_type='vertical',
+        v_map=None,
+        h=h
+        )(v_masked_map)
+    ### for residual connection
+    h_masked_map = masked_conv(h_stack_in, filter_size, 'horizontal')
+    ### Mask B is applied to the subsequent layers.
+    h_stack_out = GatedCNN(
+        n_filters,
+        'horizontal',
+        v_map=v_feed_map,
+        h=self.h
+        )(h_masked_map)
+    h_stack_out = Conv2D(
+        filters=n_filters,
+        kernel_size=1,
+        padding='valid'
+        )(h_stack_out)
+    ### residual connection
+    h_stack_out = Add()([h_stack_in, h_stack_out])
+    return (v_stack_out, h_stack_out)
+

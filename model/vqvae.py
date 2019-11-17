@@ -126,7 +126,7 @@ class VQVAE():
         vector_quantizer = VectorQuantizer(self.k, name="vector_quantizer")
         codebook_indices = vector_quantizer(z_e)
         print(K.int_shape(codebook_indices))
-        encoder = Model(inputs=encoder_inputs, outputs=codebook_indices, name='encoder')
+        self.encoder = Model(inputs=encoder_inputs, outputs=codebook_indices, name='encoder')
 
         ## Decoder already built
     
@@ -163,6 +163,8 @@ class VQVAE():
             loss=['mse', partial(vq_latent_loss, beta=self.beta)],
             metrics=[zq_norm, ze_norm]
             )
+        print(self.vq_vae.summary())
+        print("Model Metrics: {}".format(self.vq_vae.metrics_names))
     
     def get_vq_vae_codebook(self):
         codebook = vector_model.predict(np.arange(k))
@@ -181,9 +183,9 @@ class VQVAE():
             img_dim=self.img_dim_x
             )
         real_batch, real_labels = card_generator.next()
-        self.selected_samples = real_batch[:16]
+        self.selected_samples = np.array(real_batch[:16])
         self.reconstruction_original()
-            
+        self.reconstruction_validation(-1)
         n_batches = card_generator.n_batches
         for epoch in range(epochs):
             recon_accum = []
@@ -194,9 +196,9 @@ class VQVAE():
             pbar = tqdm(total=n_batches)
             for batch_i in range(n_batches):
                 real_batch, real_labels = card_generator.next()
-                dummy = np.zeros((batch_size, 4, 4, self.latent_dim*2))
+                dummy = np.zeros((self.batch_size, 32, 32, self.latent_dim*2))
 
-                _, recon_loss, kl_loss, _, _, vqnorm, venorm, _ = self.vq_vae.train_on_batch(
+                _, recon_loss, kl_loss, _, _, vqnorm, venorm = self.vq_vae.train_on_batch(
                     real_batch,
                     [real_batch, dummy]
                     )
@@ -219,7 +221,7 @@ class VQVAE():
 
             if epoch % self.save_freq == 0:
                 self.reconstruction_validation(epoch)
-                self.save_model_weights(epoch, np.mean(loss_accum))
+                self.save_model_weights(epoch, np.mean(recon_accum))
 
             card_generator.shuffle()
         card_generator.end()
@@ -228,8 +230,8 @@ class VQVAE():
         print('Generating Images...')
         if not os.path.isdir(self.validation_dir):
             os.mkdir(self.validation_dir)
-        reconstructed_imgs = self.vq_vae.predict(self.selected_samples)
-        reconstructed_imgs = [((img+1)*127.5).astype(np.uint8) for img in reconstructed_imgs]
+        reconstructed_imgs, _ = self.vq_vae.predict(self.selected_samples)
+        reconstructed_imgs = ((np.array(reconstructed_imgs)+1)*127.5).astype(np.uint8)
 
         # fill a grid
         grid_dim = int(np.sqrt(reconstructed_imgs.shape[0]))
@@ -243,8 +245,8 @@ class VQVAE():
             y = y_i * self.img_dim_y
             img_grid[y:y+self.img_dim_y, x:x+self.img_dim_x, :] = img
 
-        img_grid = Image.fromarray(img_grid.astype(np.uint8))
-        img_grid.save(os.path.join(self.validation_dir, "{}_validation_img_{}.png".format(self.name, epoch)))
+        savename = os.path.join(self.validation_dir, "{}_validation_img_{}.png".format(self.name, epoch))
+        cv2.imwrite(savename, img_grid.astype(np.uint8)[..., ::-1])
 
     def reconstruction_original(self):
         print('Generating Images...')
@@ -252,19 +254,21 @@ class VQVAE():
             os.mkdir(self.validation_dir)
 
         # fill a grid
-        grid_dim = int(np.sqrt(self.selected_samples.shape[0]))
+        print(self.selected_samples.shape)
+        reconstructed_imgs = (self.selected_samples+1)*127.5
+        grid_dim = int(np.sqrt(reconstructed_imgs.shape[0]))
         img_grid = np.zeros(shape=(self.img_dim_x*grid_dim, 
                                    self.img_dim_y*grid_dim,
                                    self.img_depth))
 
         positions = itertools.product(range(grid_dim), range(grid_dim))
-        for (x_i, y_i), img in zip(positions, self.selected_samples):
+        for (x_i, y_i), img in zip(positions, reconstructed_imgs):
             x = x_i * self.img_dim_x
             y = y_i * self.img_dim_y
             img_grid[y:y+self.img_dim_y, x:x+self.img_dim_x, :] = img
 
-        img_grid = Image.fromarray(img_grid.astype(np.uint8))
-        img_grid.save(os.path.join(self.validation_dir, "{}_original_img.png".format(self.name)))
+        savename = os.path.join(self.validation_dir, "{}_original_img.png".format(self.name))
+        cv2.imwrite(savename, img_grid.astype(np.uint8)[..., ::-1])
 
     def save_model_weights(self, epoch, loss):
         if not os.path.isdir(self.checkpoint_dir):

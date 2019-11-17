@@ -10,6 +10,71 @@ import keras
 
 from tensorflow.python.training import moving_averages
 
+class GatedCNN(Layer):
+    '''
+    Convolution layer with gated activation unit.
+    Adopted from https://github.com/suga93/pixelcnn_keras/blob/master/core/layers.py
+    '''
+    def __init__(
+        self,
+        n_filters,
+        stack_type,
+        v_map=None,
+        h=None,
+        crop_right=False,
+        **kwargs):
+        '''
+        Args:
+            n_filters (int)         : Number of the filters (feature maps)
+            stack_type (str)        : 'vertical' or 'horizontal'
+            v_map (numpy.ndarray)   : Vertical maps if feeding into horizontal stack. (default:None)
+            h (numpy.ndarray)       : Latent vector to model the conditional distribution p(x|h) (default:None)
+            crop_right (bool)       : if True, crop rightmost of the feature maps (mask A, introduced in [https://arxiv.org/abs/1601.06759] )
+        '''
+        super(GatedCNN, self).__init__(**kwargs)
+        self.n_filters = n_filters
+        self.v_map = v_map
+        self.h = h
+        self.crop_right = crop_right
+    def build(self, input_shape):
+        input_dim = input_shape[-1]
+        if self.h is not None:
+            self.kernel = self.add_weight(
+                shape=(input_dim, 2*self.n_filters),
+                initializer=VarianceScaling(1),
+                trainable=True,
+                name='kernel'
+                )
+
+    def crop_right(self, x):
+        x_shape = K.int_shape(x)
+        return x[:,:,:x_shape[2]-1,:]
+
+    def call(self, xW):
+        '''calculate gated activation maps given input maps '''
+        if self.crop_right:
+            xW = Lambda(self.crop_right)(xW)
+
+        if self.v_map is not None:
+            xW = Add()([xW, self.v_map])
+        
+        if self.h is not None:
+            hV = K.dot(self.h, self.kernel)
+            hV = Reshape((1, 1, 2*self.n_filters))(hV)
+            xW = xW + hV
+
+        xW_f = xW[..., :self.n_filters]
+        xW_g = xW[..., self.n_filters:]
+
+        xW_f = K.tanh(xW_f)
+        xW_g = K.sigmoid(xW_g)
+
+        res = Multiply()([xW_f, xW_g])
+        return res
+
+    def compute_output_shape(self, input_shape):
+        return input_shape
+
 class VectorQuantizer(Layer):  
     def __init__(self, k, **kwargs):
         super(VectorQuantizer, self).__init__(**kwargs)
@@ -59,20 +124,6 @@ class NoiseLayer(Layer):
     def compute_output_shape(self, input_shape):
         return input_shape
 
-class DestructiveSampling2D(Layer):
-    def __init__(self, skip_size=2, **kwargs):
-        self.skip_size = skip_size
-        super(DestructiveSampling2D, self).__init__(**kwargs)
-
-    def build(self, input_shape):
-        super(DestructiveSampling2D, self).build(input_shape)
-
-    def call(self, inputs):
-        return inputs[:, ::self.skip_size, ::self.skip_size, :]
-
-    def compute_output_shape(self, input_shape):
-        return (input_shape[0], input_shape[1]//self.skip_size, input_shape[1]//self.skip_size, input_shape[-1])
-
 
 class LowPassFilter2D(Layer):
     def __init__(self, kernel_size=3, **kwargs):
@@ -114,7 +165,7 @@ class LowPassFilter2D(Layer):
             y = self.blur2d(x)
             @tf.custom_gradient
             def grad(dy):
-                dx = _blur2d(dy, flip=True)
+                dx = self.blur2d(dy, flip=True)
                 return dx, lambda ddx: self.blur2d(ddx)
             return y, grad
         return func(inputs)

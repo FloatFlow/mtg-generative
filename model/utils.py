@@ -77,7 +77,7 @@ def gradient_penalty_loss(y_true, y_pred, averaged_samples, weight=1):
     # Penalize the gradient norm
     return K.mean(gradient_penalty * weight)
 
-def vq_latent_loss(y_true, y_pred, beta=1, sample_weights=1):
+def vq_latent_loss(y_true, y_pred, beta=1, sample_weight=1):
     y_true = None
     latent_dim = K.int_shape(y_pred)[-1]//2
     z_e = y_pred[..., :latent_dim]
@@ -353,6 +353,7 @@ class CardGenerator():
                 if numpy_batch.shape == (self.batch_size, self.img_dim, self.img_dim, 3):
                     self.queue.put((numpy_batch, label_batch))
             except ValueError:
+                print("Warning: Batch Dropped")
                 continue
 
     def next(self):
