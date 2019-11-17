@@ -279,8 +279,7 @@ class VQVAE2():
             self.pixelcnn32.summary(print_fn=lambda x: f.write(x + '\n'))
         self.pixelcnn32.compile(
             optimizer=Adam(self.lr, beta_1=0.0, beta_2=0.999),
-            loss=SparseCategoricalCrossentropy(from_logits=False),
-            #loss=CategoricalCrossentropy(),
+            loss=SparseCategoricalCrossentropy(from_logits=True),
             metrics=[pixelcnn_accuracy]
             )
         self.pixelcnn64, self.pixelsampler64 = self.build_pixelcnn(
@@ -290,8 +289,7 @@ class VQVAE2():
             )
         self.pixelcnn64.compile(
             optimizer=Adam(self.lr, beta_1=0.0, beta_2=0.999),
-            loss=SparseCategoricalCrossentropy(from_logits=False),
-            #loss=CategoricalCrossentropy(),
+            loss=SparseCategoricalCrossentropy(from_logits=True),
             metrics=[pixelcnn_accuracy]
             )
 
@@ -376,21 +374,19 @@ class VQVAE2():
                     loss32, acc32 = self.pixelcnn32.train_on_batch(
                         [codebook_indices32, real_labels],
                         np.expand_dims(codebook_indices32, axis=-1)
-                        #np.eye(self.k)[codebook_indices32]
                         )
                     loss64, acc64 = self.pixelcnn64.train_on_batch(
                         [codebook_indices64, real_labels],
                         np.expand_dims(codebook_indices64, axis=-1)
-                        #np.eye(self.k)[codebook_indices64]
                         )
                 else:
                     loss32, acc32 = self.pixelcnn32.train_on_batch(
                         codebook_indices32,
-                        codebook_indices32
+                        np.expand_dims(codebook_indices32, axis=-1)
                         )
                     loss64, acc64 = self.pixelcnn64.train_on_batch(
                         codebook_indices64,
-                        codebook_indices64
+                        np.expand_dims(codebook_indices64, axis=-1)
                         )
 
                 losses.append(np.mean([loss32, loss64]))
