@@ -403,7 +403,6 @@ class VQVAE2():
                 )
 
             if epoch % self.save_freq == 0:
-                self.reconstruction_validation(epoch)
                 self.save_model_weights(epoch, np.mean(losses))
                 self.save_model_weights_extended(epoch, np.mean(losses))
 
