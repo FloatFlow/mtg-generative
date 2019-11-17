@@ -1,6 +1,7 @@
 # imports
 import numpy as np
-from keras.layers import Layer, Dense, Conv2D, Conv2DTranspose, Embedding, InputSpec, Conv1D, Conv3D
+from keras.layers import Layer, Dense, Conv2D, Conv2DTranspose, Embedding, InputSpec, Conv1D, \
+                         Multiply, Add, Conv3D, Reshape
 import keras.backend as K
 #from keras.models import 
 import tensorflow as tf
@@ -37,34 +38,28 @@ class GatedCNN(Layer):
         self.h = h
         self.crop_right = crop_right
     def build(self, input_shape):
-        input_dim = input_shape[-1]
-        if self.h is not None:
-            self.kernel = self.add_weight(
-                shape=(input_dim, 2*self.n_filters),
-                initializer=VarianceScaling(1),
-                trainable=True,
-                name='kernel'
-                )
+        super(GatedCNN, self).build(input_shape)
 
-    def crop_right(self, x):
+    def crop_right_func(self, x):
         x_shape = K.int_shape(x)
         return x[:,:,:x_shape[2]-1,:]
 
     def call(self, xW):
         '''calculate gated activation maps given input maps '''
         if self.crop_right:
-            xW = Lambda(self.crop_right)(xW)
+            xW = self.crop_right_func(xW)
 
         if self.v_map is not None:
             xW = Add()([xW, self.v_map])
         
         if self.h is not None:
-            hV = K.dot(self.h, self.kernel)
+            hV = Dense(2*self.n_filters)(self.h)
+            #hV = K.reshape(hV, (1, 1, 2*self.n_filters))
             hV = Reshape((1, 1, 2*self.n_filters))(hV)
             xW = xW + hV
 
-        xW_f = xW[..., :self.n_filters]
-        xW_g = xW[..., self.n_filters:]
+        xW_f = xW[:, :, :, :self.n_filters]
+        xW_g = xW[:, :, :, self.n_filters:]
 
         xW_f = K.tanh(xW_f)
         xW_g = K.sigmoid(xW_g)
@@ -73,7 +68,7 @@ class GatedCNN(Layer):
         return res
 
     def compute_output_shape(self, input_shape):
-        return input_shape
+        return (input_shape[0], input_shape[1], input_shape[1], input_shape[3]//2)
 
 class VectorQuantizer(Layer):  
     def __init__(self, k, **kwargs):

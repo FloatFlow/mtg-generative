@@ -97,7 +97,22 @@ def ze_norm(y_true, y_pred):
     del y_true
     latent_dim = K.int_shape(y_pred)[-1]//2
     z_e = y_pred[..., :latent_dim]
-    return tf.reduce_mean(tf.norm(z_e, axis=-1))   
+    return tf.reduce_mean(tf.norm(z_e, axis=-1))
+
+def pixelcnn_accuracy(y_true, y_pred):
+    """Train the PixelCNN and monitor prediction accuracy"""
+    size = K.int_shape(y_pred)[-2]
+    k = K.int_shape(y_pred)[-1]
+    y_true = K.reshape(y_true, (-1, size * size))
+    y_pred = K.reshape(y_pred, (-1, size * size, k))
+    acc = K.cast(
+        K.equal(
+            y_true,
+            K.cast(K.argmax(y_pred, axis=-1), "float32")
+            ),
+        "float32"
+        )
+    return acc
 
 ####################################################
 ## Image Preprocessing and loading

@@ -12,11 +12,13 @@ from keras.layers import Dense, Reshape, Lambda, Multiply, Add, \
 from keras.models import Model
 from keras.optimizers import Adam
 from keras.initializers import VarianceScaling
+from keras.losses import SparseCategoricalCrossentropy, CategoricalCrossentropy
 import keras.backend as K
 import tensorflow as tf
+import tensorflow_probability as tfp
 
-from model.utils import CardGenerator, vq_latent_loss, zq_norm, ze_norm
-from model.network_blocks import resblock_decoder, resblock_encoder
+from model.utils import CardGenerator, vq_latent_loss, zq_norm, ze_norm, pixelcnn_accuracy
+from model.network_blocks import resblock_decoder, resblock_encoder, intro_pixelcnn_layer, pixelcnn_layer
 from model.layers import VectorQuantizer
 
 
@@ -54,6 +56,7 @@ class VQVAE2():
         self.latent_dim = 64
         self.k = 256
         self.beta = 0.25
+        self.conditional = True
         self.build_decoder()
         self.build_model()
         print("Model Name: {}".format(self.name))
@@ -252,10 +255,45 @@ class VQVAE2():
             padding='same',
             kernel_initializer=VarianceScaling(1)
             )(x)
+
+        # Distribution to sample from the pixelcnn
+        sampled = Lambda(lambda x: tfp.distributions.Categorical(logits=x).sample())(autoregression)
         if conditional:
-            return Model([pixelcnn_prior_inputs, h], autoregression)
+            return (
+                Model([pixelcnn_prior_inputs, h], autoregression),
+                Model([pixelcnn_prior_inputs, h], sampled, name='pixelcnn-prior-sampler')
+                )
         else:
-            return Model(pixelcnn_prior_inputs, autoregression)
+            return (
+                Model(pixelcnn_prior_inputs, autoregression),
+                Model(pixelcnn_prior_inputs, sampled)
+                )
+
+    def compile_pixelcnns(self, n_layers=10):
+        self.pixelcnn32, self.pixelsampler32 = self.build_pixelcnn(
+            input_shape=(32, 32),
+            n_layers=n_layers,
+            conditional=self.conditional
+            )
+        with open('pixelcnn32_architecture.txt', 'w') as f:
+            self.pixelcnn32.summary(print_fn=lambda x: f.write(x + '\n'))
+        self.pixelcnn32.compile(
+            optimizer=Adam(self.lr, beta_1=0.0, beta_2=0.999),
+            loss=SparseCategoricalCrossentropy(from_logits=False),
+            #loss=CategoricalCrossentropy(),
+            metrics=[pixelcnn_accuracy]
+            )
+        self.pixelcnn64, self.pixelsampler64 = self.build_pixelcnn(
+            input_shape=(64, 64),
+            n_layers=n_layers,
+            conditional=self.conditional
+            )
+        self.pixelcnn64.compile(
+            optimizer=Adam(self.lr, beta_1=0.0, beta_2=0.999),
+            loss=SparseCategoricalCrossentropy(from_logits=False),
+            #loss=CategoricalCrossentropy(),
+            metrics=[pixelcnn_accuracy]
+            )
 
     ###############################
     ## All our training, etc
@@ -312,25 +350,16 @@ class VQVAE2():
         card_generator.end()
 
     def train_pixelcnn(self, epochs):
+
+        self.compile_pixelcnns()
+
         card_generator = CardGenerator(
             img_dir=self.training_dir,
             batch_size=self.batch_size,
             n_cpu=self.n_cpu,
             img_dim=self.img_dim_x
             )
-
-        self.pixelcnn32 = build_pixelcnn(input_shape=(32, 32), n_layers=10, conditional=True)
-        self.pixelcnn32.compile(
-            optimizer=Adam(self.lr, beta_1=0.0, beta_2=0.999),
-            loss=partial(SparseCategoricalCrossentropy, from_logits=True),
-            metrics=pixelcnn_accuracy
-            )
-        self.pixelcnn64 = build_pixelcnn(input_shape=(64, 64), n_layers=10, conditional=True)
-        self.pixelcnn64.compile(
-            optimizer=Adam(self.lr, beta_1=0.0, beta_2=0.999),
-            loss=partial(SparseCategoricalCrossentropy, from_logits=True),
-            metrics=pixelcnn_accuracy
-            )
+        
         real_batch, real_labels = card_generator.next()
 
         n_batches = card_generator.n_batches
@@ -342,28 +371,46 @@ class VQVAE2():
             for batch_i in range(n_batches):
                 real_batch, real_labels = card_generator.next()
                 codebook_indices32, codebook_indices64 = self.encoder.predict(real_batch)
-                recon_accum.append(recon_loss)
-                kl_accum.append(kl_loss32+kl_loss64)
-                vq_accum.append(vqnorm32+vqnorm64)
-                ve_accum.append(venorm32+venorm64)
+
+                if self.conditional:
+                    loss32, acc32 = self.pixelcnn32.train_on_batch(
+                        [codebook_indices32, real_labels],
+                        np.expand_dims(codebook_indices32, axis=-1)
+                        #np.eye(self.k)[codebook_indices32]
+                        )
+                    loss64, acc64 = self.pixelcnn64.train_on_batch(
+                        [codebook_indices64, real_labels],
+                        np.expand_dims(codebook_indices64, axis=-1)
+                        #np.eye(self.k)[codebook_indices64]
+                        )
+                else:
+                    loss32, acc32 = self.pixelcnn32.train_on_batch(
+                        codebook_indices32,
+                        codebook_indices32
+                        )
+                    loss64, acc64 = self.pixelcnn64.train_on_batch(
+                        codebook_indices64,
+                        codebook_indices64
+                        )
+
+                losses.append(np.mean([loss32, loss64]))
+                accuracies.append(np.mean([acc32, acc64]))
 
                 pbar.update()
             pbar.close()
 
-            print('{}/{} --> recon loss: {}, kl loss: {}, z_q norm: {}, z_e norm: {}'.format(
+            print('{}/{} --> sparse bce loss: {}, accuracy: {}'.format(
                 epoch, 
                 epochs, 
-                np.mean(recon_accum),
-                np.mean(kl_accum),
-                np.mean(vq_accum),
-                np.mean(ve_accum))
+                np.mean(losses),
+                np.mean(accuracies))
                 )
 
             if epoch % self.save_freq == 0:
                 self.reconstruction_validation(epoch)
-                self.save_model_weights(epoch, np.mean(recon_accum))
+                self.save_model_weights(epoch, np.mean(losses))
+                self.save_model_weights_extended(epoch, np.mean(losses))
 
-            card_generator.shuffle()
         card_generator.end()
 
     def reconstruction_validation(self, epoch):
@@ -417,3 +464,13 @@ class VQVAE2():
         encoder_savename = os.path.join(self.checkpoint_dir, 'vqvae_encoder_weights_{}_{:.3f}.h5'.format(epoch, loss))
         self.decoder.save_weights(decoder_savename)
         self.encoder.save_weights(encoder_savename)
+
+    def save_model_weights_extended(self, epoch, loss):
+        model_names = ["pixelcnn32", "pixelsampler32", "pixelcnn64", "pixelsampler64"]
+        for i, model in enumerate([self.pixelcnn32, self.pixelsampler32, self.pixelcnn64, self.pixelsampler64]):
+            savename = os.path.join(
+                self.checkpoint_dir,
+                'vqvae_{}_weights_{}_{:.3f}.h5'.format(model_names[i], epoch, loss)
+                )
+            model.save_weights(savename)
+ 
