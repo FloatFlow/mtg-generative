@@ -17,7 +17,7 @@ import keras.backend as K
 import tensorflow as tf
 import tensorflow_probability as tfp
 
-from model.utils import CardGenerator, vq_latent_loss, zq_norm, ze_norm, pixelcnn_accuracy
+from model.utils import CardGenerator, vq_latent_loss, zq_norm, ze_norm, pixelcnn_accuracy, label_generator
 from model.network_blocks import resblock_decoder, resblock_encoder, intro_pixelcnn_layer, pixelcnn_layer
 from model.layers import VectorQuantizer
 
@@ -269,23 +269,26 @@ class VQVAE2():
                 Model(pixelcnn_prior_inputs, sampled)
                 )
 
-    def compile_pixelcnns(self, n_layers=10):
+    def build_pixelcnns_and_samplers(self, n_layers=10):
         self.pixelcnn32, self.pixelsampler32 = self.build_pixelcnn(
             input_shape=(32, 32),
             n_layers=n_layers,
             conditional=self.conditional
             )
-        with open('pixelcnn32_architecture.txt', 'w') as f:
-            self.pixelcnn32.summary(print_fn=lambda x: f.write(x + '\n'))
-        self.pixelcnn32.compile(
-            optimizer=Adam(self.lr, beta_1=0.0, beta_2=0.999),
-            loss=SparseCategoricalCrossentropy(from_logits=True),
-            metrics=[pixelcnn_accuracy]
-            )
+        #with open('pixelcnn32_architecture.txt', 'w') as f:
+        #    self.pixelcnn32.summary(print_fn=lambda x: f.write(x + '\n'))
+        
         self.pixelcnn64, self.pixelsampler64 = self.build_pixelcnn(
             input_shape=(64, 64),
             n_layers=n_layers,
             conditional=self.conditional
+            )
+
+    def compile_pixelcnns(self):
+        self.pixelcnn32.compile(
+            optimizer=Adam(self.lr, beta_1=0.0, beta_2=0.999),
+            loss=SparseCategoricalCrossentropy(from_logits=True),
+            metrics=[pixelcnn_accuracy]
             )
         self.pixelcnn64.compile(
             optimizer=Adam(self.lr, beta_1=0.0, beta_2=0.999),
@@ -306,7 +309,7 @@ class VQVAE2():
             )
         real_batch, real_labels = card_generator.next()
         self.selected_samples = np.array(real_batch[:16])
-        self.reconstruction_original()
+        self.reconstruction_target(self.selected_samples, -1)
         self.reconstruction_validation(-1)
         n_batches = card_generator.n_batches
         for epoch in range(epochs):
@@ -408,6 +411,35 @@ class VQVAE2():
 
         card_generator.end()
 
+    def sample_from_prior(self, prior_model, class_labels, shape):
+        """sample from the PixelCNN prior, pixel by pixel"""
+        X = np.zeros(shape, dtype=np.int32)
+        pbar = tqdm(total=X.shape[1])
+        for i in range(X.shape[1]):
+            for j in range(X.shape[2]):
+                sampled = prior_model.predict([X, class_labels])
+                X[:, i, j] = sampled[:, i, j]
+            pbar.update()
+        pbar.close()
+        return X
+
+    def generate_samples(self, n_batches):
+        pbar = tqdm(total=n_batches)
+        for i in range(n_batches):
+            class_labels = label_generator(16)
+            indices32 = self.sample_from_prior(self.pixelsampler32, class_labels, (16, 32, 32))
+            indices64 = self.sample_from_prior(self.pixelsampler64, class_labels, (16, 64, 64))
+            zq32 = self.codes_sampler32(indices32)
+            zq64 = self.codes_sampler64(indices64)
+            generated = self.decoder.predict([zq32, zq64])
+            self.reconstruction_target(generated, i)
+            pbar.update()
+        pbar.close()
+
+    ###############################
+    ## Utilities
+    ###############################  
+
     def reconstruction_validation(self, epoch):
         print('Generating Images...')
         if not os.path.isdir(self.validation_dir):
@@ -430,14 +462,13 @@ class VQVAE2():
         savename = os.path.join(self.validation_dir, "{}_validation_img_{}.png".format(self.name, epoch))
         cv2.imwrite(savename, img_grid.astype(np.uint8)[..., ::-1])
 
-    def reconstruction_original(self):
+    def reconstruction_target(self, target, n_batch):
         print('Generating Images...')
         if not os.path.isdir(self.validation_dir):
             os.mkdir(self.validation_dir)
 
         # fill a grid
-        print(self.selected_samples.shape)
-        reconstructed_imgs = (self.selected_samples+1)*127.5
+        reconstructed_imgs = (target+1)*127.5
         grid_dim = int(np.sqrt(reconstructed_imgs.shape[0]))
         img_grid = np.zeros(shape=(self.img_dim_x*grid_dim, 
                                    self.img_dim_y*grid_dim,
@@ -449,7 +480,7 @@ class VQVAE2():
             y = y_i * self.img_dim_y
             img_grid[y:y+self.img_dim_y, x:x+self.img_dim_x, :] = img
 
-        savename = os.path.join(self.validation_dir, "{}_original_img.png".format(self.name))
+        savename = os.path.join(self.validation_dir, "{}_sample_img_{}.png".format(self.name, n_batch))
         cv2.imwrite(savename, img_grid.astype(np.uint8)[..., ::-1])
 
     def save_model_weights(self, epoch, loss):

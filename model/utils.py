@@ -265,14 +265,12 @@ def card_crop(img_path, img_dim=256):
     img = np.array(img).astype(np.float32)
     return img
 
-
-def label_generator(n_samples, seed, n_classes=2):
+def label_generator(n_samples, n_shared_classes=2):
     sample_list = list(itertools.permutations([1,0,0,0,0])) 
-    if n_classes >= 2:
+    if n_shared_classes >= 2:
         sample_list = sample_list + list(itertools.permutations([1,1,0,0,0]))
-    if n_classes >= 3: 
+    if n_shared_classes >= 3: 
         sample_list = sample_list + list(itertools.permutations([1,1,1,0,0]))
-    random.seed(seed)
     random.shuffle(sample_list)
     return np.array(sample_list[:n_samples])
 

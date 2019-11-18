@@ -1,6 +1,7 @@
 import argparse
 import keras.backend as K
 from model.vqvae import VQVAE
+from model.vqvae2 import VQVAE2
 import psutil
 
 N_CPU = psutil.cpu_count()
@@ -8,16 +9,22 @@ N_CPU = psutil.cpu_count()
 def parse_args():
     parser = argparse.ArgumentParser(description='Parameters for VQ-VAE-2')
 
-    # general parameters
+    # general directory allocations
     parser.add_argument(
         '--train',
         type=bool,
-        default=True
+        default=False
+        )
+    parser.add_argument(
+        '--train_target',
+        type=str,
+        default='pixelcnn',
+        help='can either be "pixelcnn" or "autoencoder"'
         )
     parser.add_argument(
         '--training_dir',
         type=str,
-        default='data/mtg_images'
+        default='mtg_images'
         )
     parser.add_argument(
         '--validation_dir',
@@ -34,30 +41,47 @@ def parse_args():
         type=str,
         default='logging/model_saves'
         )
+
+    # load previous weights
     parser.add_argument(
-        '--load_checkpoint',
+        '--load_autoencoder_checkpoint',
         type=bool,
-        default=False)
+        default=True)
     parser.add_argument(
-        '--e_weights',
+        '--encoder_weights',
         type=str,
-        default='logging/model_saves/stylegan_hinge_generator_weights_18_-0.002.h5'
+        default='logging/model_saves/vqvae_encoder_weights_120_0.009.h5'
         )
     parser.add_argument(
-        '--d_weights',
+        '--decoder_weights',
         type=str,
-        default='logging/model_saves/stylegan_hinge_discriminator_weights_18_4.003.h5'
+        default='logging/model_saves/vqvae_decoder_weights_120_0.009.h5'
         )
     parser.add_argument(
-        '--epochs',
-        type=int,
-        default=1000
+        '--load_pixelcnn_checkpoint',
+        type=bool,
+        default=True)
+    parser.add_argument(
+        '--pixelcnn32_weights',
+        type=str,
+        default='logging/model_saves/vqvae_pixelcnn32_weights_200_2.875.h5'
         )
     parser.add_argument(
-        '--n_cpu',
-        type=int,
-        default=N_CPU
+        '--pixelcnn64_weights',
+        type=str,
+        default='logging/model_saves/vqvae_pixelcnn64_weights_200_2.875.h5'
         )
+    parser.add_argument(
+        '--prior_sampler32_weights',
+        type=str,
+        default='logging/model_saves/vqvae_pixelsampler32_weights_200_2.875.h5'
+        )
+    parser.add_argument(
+        '--prior_sampler64_weights',
+        type=str,
+        default='logging/model_saves/vqvae_pixelsampler64_weights_200_2.875.h5'
+        )
+    
 
     # model parameters
     parser.add_argument(
@@ -83,20 +107,32 @@ def parse_args():
     parser.add_argument(
         '--save_freq',
         type=int,
-        default=5
+        default=10
         )
     parser.add_argument(
         '--batch_size',
         type=int,
         default=16
         )
+    parser.add_argument(
+        '--epochs',
+        type=int,
+        default=1000
+        )
+    parser.add_argument(
+        '--n_cpu',
+        type=int,
+        default=N_CPU
+        )
 
     return parser.parse_args()
 
 def main():
     args = parse_args()
+    if args.train_target == 'pixelcnn':
+        assert args.load_autoencoder_checkpoint
 
-    vae = VQVAE(
+    vae = VQVAE2(
         img_dim_x=args.img_dim_x,
         img_dim_y=args.img_dim_y,
         img_depth=args.img_depth,
@@ -111,15 +147,30 @@ def main():
         )
 
     if args.train:
-        if args.load_checkpoint:
-            vae.load_model_weights(args.decoder_weights, args.encoder_weights)
-            print('Model Checkpoint Loaded...')
+        if args.load_autoencoder_checkpoint:
+            vae.encoder.load_weights(args.encoder_weights, by_name=True)
+            vae.decoder.load_weights(args.decoder_weights, by_name=True)
+            print('Successfully loaded autoencoder checkpoints...')
+        if args.train_target == 'autoencoder':
+            vae.train(args.epochs)
 
-        vae.train(args.epochs)
-
+        else:
+            vae.build_pixelcnns_and_samplers()
+            if args.load_pixelcnn_checkpoint:
+                vae.pixelcnn32.load_weights(args.pixelcnn32_weights, by_name=True)
+                vae.pixelcnn64.load_weights(args.pixelcnn64_weights, by_name=True)
+                print('Successfully loaded pixelcnn checkpoints...')
+            vae.train_pixelcnn(args.epochs)
     else:
-        vae.predict_noise_testing(args.class_testing_labels,
-                                      args.testing_dir)
+        vae.encoder.load_weights(args.encoder_weights, by_name=True)
+        vae.decoder.load_weights(args.decoder_weights, by_name=True)
+        vae.build_pixelcnns_and_samplers()
+        vae.pixelcnn32.load_weights(args.pixelcnn32_weights, by_name=True)
+        vae.pixelcnn64.load_weights(args.pixelcnn64_weights, by_name=True)
+        vae.pixelsampler32.load_weights(args.prior_sampler32_weights, by_name=True)
+        vae.pixelsampler64.load_weights(args.prior_sampler64_weights, by_name=True)
+        print('Successfully loaded model checkpoints...')
+        vae.generate_samples(10)
 
 if __name__ == '__main__':
     main()
