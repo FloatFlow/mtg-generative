@@ -221,19 +221,10 @@ class VQVAE2():
         codebook = np.reshape(codebook, (k, d))
         return codebook
 
-    def build_pixelcnn(self, input_shape=(32, 32), n_layers=10, conditional=False):
-        pixelcnn_prior_inputs = Input(input_shape)
-        if input_shape[0] == 32:
-            z_q = self.codes_sampler_32(pixelcnn_prior_inputs)
-        else:
-            z_q = self.codes_sampler_64(pixelcnn_prior_inputs)
-        if conditional:
-            h = Input((5, ))
-        else:
-            h = None
+    def pixelcnn_pass(self, x, h, n_layers=20):
         v_stack, h_stack = intro_pixelcnn_layer(
-            z_q,
-            filter_size=(7, 7),
+            x,
+            filter_size=(5, 5),
             n_filters=self.latent_dim,
             h=h
             )
@@ -241,6 +232,7 @@ class VQVAE2():
             v_stack, h_stack = pixelcnn_layer(
                 v_stack,
                 h_stack,
+                filter_size=(5, 5),
                 h=h,
                 n_filters=self.latent_dim)
         x = Conv2D(
@@ -255,46 +247,42 @@ class VQVAE2():
             padding='same',
             kernel_initializer=VarianceScaling(1)
             )(x)
+        return autoregression
+
+    def build_pixelcnn(self, n_layers=20):
+        pixelcnn_prior_inputs_32 = Input((32, 32))
+        pixelcnn_prior_inputs_64 = Input((64, 64))
+        h = Input((5, ))
+        
+        z_q_32 = self.codes_sampler_32(pixelcnn_prior_inputs_32)
+        context_32 = self.pixelcnn_pass(z_q_32, h=h, n_layers=n_layers)
+        context_pass = UpSampling2D(2)(context_32)
+
+        z_q_64 = self.codes_sampler_64(pixelcnn_prior_inputs_64)
+        context_64 = self.pixelcnn_pass(z_q_64, h=context_pass, n_layers=n_layers)        
+        
 
         # Distribution to sample from the pixelcnn
-        sampled = Lambda(lambda x: tfp.distributions.Categorical(logits=x).sample())(autoregression)
-        if conditional:
-            return (
-                Model([pixelcnn_prior_inputs, h], autoregression),
-                Model([pixelcnn_prior_inputs, h], sampled, name='pixelcnn-prior-sampler')
-                )
-        else:
-            return (
-                Model(pixelcnn_prior_inputs, autoregression),
-                Model(pixelcnn_prior_inputs, sampled)
-                )
+        sampled_32 = Lambda(lambda x: tfp.distributions.Categorical(logits=x).sample())(context_32)
+        sampled_64 = Lambda(lambda x: tfp.distributions.Categorical(logits=x).sample())(context_64)
 
-    def build_pixelcnns_and_samplers(self, n_layers=10):
-        self.pixelcnn32, self.pixelsampler32 = self.build_pixelcnn(
-            input_shape=(32, 32),
-            n_layers=n_layers,
-            conditional=self.conditional
-            )
-        #with open('pixelcnn32_architecture.txt', 'w') as f:
-        #    self.pixelcnn32.summary(print_fn=lambda x: f.write(x + '\n'))
-        
-        self.pixelcnn64, self.pixelsampler64 = self.build_pixelcnn(
-            input_shape=(64, 64),
-            n_layers=n_layers,
-            conditional=self.conditional
+        self.pixelcnn = Model(
+            [pixelcnn_prior_inputs_32, pixelcnn_prior_inputs_64, h],
+            [context_32, context_64]
             )
 
-    def compile_pixelcnns(self):
-        self.pixelcnn32.compile(
-            optimizer=Adam(self.lr, beta_1=0.0, beta_2=0.999),
-            loss=SparseCategoricalCrossentropy(from_logits=True),
-            metrics=[pixelcnn_accuracy]
+        self.pixel_sampler = Model(
+            [pixelcnn_prior_inputs_32, pixelcnn_prior_inputs_64, h],
+            [sampled_32, sampled_64]
             )
-        self.pixelcnn64.compile(
+
+        self.pixelcnn.compile(
             optimizer=Adam(self.lr, beta_1=0.0, beta_2=0.999),
-            loss=SparseCategoricalCrossentropy(from_logits=True),
-            metrics=[pixelcnn_accuracy]
+            loss=[SparseCategoricalCrossentropy(from_logits=True), SparseCategoricalCrossentropy(from_logits=True)],
+            metrics=[pixelcnn_accuracy, pixelcnn_accuracy]
             )
+        print(self.pixelcnn.summary())
+        print("Model Metrics: {}".format(self.pixelcnn.metrics_names))
 
     ###############################
     ## All our training, etc
@@ -351,9 +339,6 @@ class VQVAE2():
         card_generator.end()
 
     def train_pixelcnn(self, epochs):
-
-        self.compile_pixelcnns()
-
         card_generator = CardGenerator(
             img_dir=self.training_dir,
             batch_size=self.batch_size,
@@ -373,26 +358,12 @@ class VQVAE2():
                 real_batch, real_labels = card_generator.next()
                 codebook_indices32, codebook_indices64 = self.encoder.predict(real_batch)
 
-                if self.conditional:
-                    loss32, acc32 = self.pixelcnn32.train_on_batch(
-                        [codebook_indices32, real_labels],
-                        np.expand_dims(codebook_indices32, axis=-1)
-                        )
-                    loss64, acc64 = self.pixelcnn64.train_on_batch(
-                        [codebook_indices64, real_labels],
-                        np.expand_dims(codebook_indices64, axis=-1)
-                        )
-                else:
-                    loss32, acc32 = self.pixelcnn32.train_on_batch(
-                        codebook_indices32,
-                        np.expand_dims(codebook_indices32, axis=-1)
-                        )
-                    loss64, acc64 = self.pixelcnn64.train_on_batch(
-                        codebook_indices64,
-                        np.expand_dims(codebook_indices64, axis=-1)
-                        )
+                loss, _, _, acc32, acc64 = self.pixelcnn.train_on_batch(
+                    [codebook_indices32, codebook_indices64, real_labels],
+                    [np.expand_dims(codebook_indices32, axis=-1), np.expand_dims(codebook_indices64, axis=-1)]
+                    )
 
-                losses.append(np.mean([loss32, loss64]))
+                losses.append(loss)
                 accuracies.append(np.mean([acc32, acc64]))
 
                 pbar.update()
@@ -429,8 +400,8 @@ class VQVAE2():
             class_labels = label_generator(16)
             indices32 = self.sample_from_prior(self.pixelsampler32, class_labels, (16, 32, 32))
             indices64 = self.sample_from_prior(self.pixelsampler64, class_labels, (16, 64, 64))
-            zq32 = self.codes_sampler32(indices32)
-            zq64 = self.codes_sampler64(indices64)
+            zq32 = self.codes_sampler_32(indices32)
+            zq64 = self.codes_sampler_64(indices64)
             generated = self.decoder.predict([zq32, zq64])
             self.reconstruction_target(generated, i)
             pbar.update()

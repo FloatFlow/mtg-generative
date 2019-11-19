@@ -53,9 +53,15 @@ class GatedCNN(Layer):
             xW = Add()([xW, self.v_map])
         
         if self.h is not None:
-            hV = Dense(2*self.n_filters)(self.h)
-            #hV = K.reshape(hV, (1, 1, 2*self.n_filters))
-            hV = Reshape((1, 1, 2*self.n_filters))(hV)
+            if len(K.int_shape(self.h)) == 2:
+                hV = Dense(2*self.n_filters)(self.h)
+                hV = Reshape((1, 1, 2*self.n_filters))(hV)
+            else:
+                hV = Conv2D(
+                    filters=2*self.n_filters,
+                    kernel_size=1,
+                    padding='same'
+                    )(self.h)
             xW = xW + hV
 
         xW_f = xW[:, :, :, :self.n_filters]
