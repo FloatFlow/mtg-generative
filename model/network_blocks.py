@@ -464,3 +464,15 @@ def pixelcnn_layer(v_stack_in, h_stack_in, filter_size=(3, 3), n_filters=64, h=N
     h_stack_out = Add()([h_stack_in, h_stack_out])
     return v_stack_out, h_stack_out
 
+def multihead_attention(inputs, n_heads=8):
+    atten_outputs = []
+    for _ in range(n_heads):
+        #atten_outputs.append(Attention()(inputs))
+        atten_outputs.append(ScaledDotProductAttention()(inputs))
+    x = Concatenate(axis=-1)(atten_outputs)
+    x = Conv2D(
+        filters=K.int_shape(inputs)[-1],
+        kernel_size=1,
+        padding='same'
+        )(x)
+    return x

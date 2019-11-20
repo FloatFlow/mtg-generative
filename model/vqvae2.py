@@ -18,7 +18,7 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 
 from model.utils import CardGenerator, vq_latent_loss, zq_norm, ze_norm, pixelcnn_accuracy, label_generator
-from model.network_blocks import resblock_decoder, resblock_encoder, intro_pixelcnn_layer, pixelcnn_layer
+from model.network_blocks import resblock_decoder, resblock_encoder, intro_pixelcnn_layer, pixelcnn_layer, multihead_attention
 from model.layers import VectorQuantizer
 
 
@@ -221,20 +221,23 @@ class VQVAE2():
         codebook = np.reshape(codebook, (k, d))
         return codebook
 
-    def pixelcnn_pass(self, x, h, n_layers=20):
+    def pixelcnn_pass(self, x, h, n_layers=20, attention=False):
         v_stack, h_stack = intro_pixelcnn_layer(
             x,
             filter_size=(5, 5),
             n_filters=self.latent_dim,
             h=h
             )
-        for _ in range(n_layers):
-            v_stack, h_stack = pixelcnn_layer(
-                v_stack,
-                h_stack,
-                filter_size=(5, 5),
-                h=h,
-                n_filters=self.latent_dim)
+        for _ in range(n_layers//5):
+            for _ in range(5):
+                v_stack, h_stack = pixelcnn_layer(
+                    v_stack,
+                    h_stack,
+                    filter_size=(5, 5),
+                    h=h,
+                    n_filters=self.latent_dim)
+            if attention:
+                h_stack = multihead_attention(h_stack)
         x = Conv2D(
             filters=self.latent_dim,
             kernel_size=1,
@@ -255,7 +258,7 @@ class VQVAE2():
         h = Input((5, ))
         
         z_q_32 = self.codes_sampler_32(pixelcnn_prior_inputs_32)
-        context_32 = self.pixelcnn_pass(z_q_32, h=h, n_layers=n_layers)
+        context_32 = self.pixelcnn_pass(z_q_32, h=h, n_layers=n_layers, attention=True)
         context_pass = UpSampling2D(2)(context_32)
 
         z_q_64 = self.codes_sampler_64(pixelcnn_prior_inputs_64)
@@ -463,8 +466,8 @@ class VQVAE2():
         self.encoder.save_weights(encoder_savename)
 
     def save_model_weights_extended(self, epoch, loss):
-        model_names = ["pixelcnn32", "pixelsampler32", "pixelcnn64", "pixelsampler64"]
-        for i, model in enumerate([self.pixelcnn32, self.pixelsampler32, self.pixelcnn64, self.pixelsampler64]):
+        model_names = ["pixelcnn", "pixelsampler"]
+        for i, model in enumerate([self.pixelcnn, self.pixel_sampler]):
             savename = os.path.join(
                 self.checkpoint_dir,
                 'vqvae_{}_weights_{}_{:.3f}.h5'.format(model_names[i], epoch, loss)

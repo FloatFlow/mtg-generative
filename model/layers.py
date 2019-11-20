@@ -671,14 +671,63 @@ class LayerNormalization(Layer):
 ## Attention Layers
 ##########################
 
+class ScaledDotProductAttention(Layer):
+    def __init__(self, **kwargs):
+        super(ScaledDotProductAttention, self).__init__(**kwargs)
+        
+    def build(self, input_shape):
+        self.channels = input_shape[-1]
+        filter_shape = (self.channels, self.channels)
+
+        # Create a trainable weight variable for this layer:
+        self.gamma = self.add_weight(name='gamma', shape=[1], initializer='zeros', trainable=True)
+        self.kernel_v = self.add_weight(
+            shape=filter_shape,
+            initializer='glorot_uniform',
+            name='kernel_v')
+        self.kernel_k = self.add_weight(
+            shape=filter_shape,
+            initializer='glorot_uniform',
+            name='kernel_k')
+        self.kernel_q = self.add_weight(
+            shape=filter_shape,
+            initializer='glorot_uniform',
+            name='kernel_q')
+
+        super(ScaledDotProductAttention, self).build(input_shape)
+        # Set input spec.
+        self.input_spec = InputSpec(ndim=4,
+                                    axes={3: input_shape[-1]})
+        self.built = True
+
+
+    def call(self, inputs):
+        def hw_flatten(x):
+            return K.reshape(x, shape=[K.shape(x)[0], K.shape(x)[1]*K.shape(x)[2], K.shape(x)[-1]])
+
+        v = K.dot(inputs, self.kernel_v)
+        k = K.dot(inputs, self.kernel_k)
+        q = K.dot(inputs, self.kernel_q)
+
+        s = tf.matmul(hw_flatten(v), hw_flatten(k), transpose_b=True)  # # [bs, N, N]
+        s = s*self.gamma
+        beta = K.softmax(s, axis=-1)  # attention map
+
+        o = tf.matmul(beta, hw_flatten(q))
+        outputs = K.reshape(o, shape=K.shape(inputs))  # [bs, h, w, C]
+        return outputs+inputs
+
+    def compute_output_shape(self, input_shape):
+        return input_shape
+
 class Attention(Layer):
-    def __init__(self, ch, **kwargs):
+    def __init__(self, **kwargs):
         super(Attention, self).__init__(**kwargs)
-        self.channels = ch
+        
+    def build(self, input_shape):
+        self.channels = input_shape[-1]
         self.filters_f_g = self.channels // 8
         self.filters_h = self.channels
-
-    def build(self, input_shape):
         kernel_shape_f_g = (1, 1) + (self.channels, self.filters_f_g)
         kernel_shape_h = (1, 1) + (self.channels, self.filters_h)
 
@@ -744,16 +793,15 @@ class Attention(Layer):
         return input_shape
 
 # google version of attention
-class Attention_2(Layer):
+class Attention2(Layer):
     def __init__(self, ch, **kwargs):
-        super(Attention_2, self).__init__(**kwargs)
+        super(Attention2, self).__init__(**kwargs)
         self.channels = ch
         self.filters_f_g = self.channels // 8
         self.filters_h = self.channels // 2
 
     def build(self, input_shape):
         kernel_shape_f_g = (1, 1) + (self.channels, self.filters_f_g)
-        print(kernel_shape_f_g)
         kernel_shape_h = (1, 1) + (self.channels, self.filters_h)
         kernel_shape_o = (1, 1) + (self.channels // 2, self.channels)
 
@@ -780,7 +828,7 @@ class Attention_2(Layer):
         self.bias_h = self.add_weight(shape=(self.filters_h,),
                                       initializer='zeros',
                                       name='bias_h')
-        super(Attention_2, self).build(input_shape)
+        super(Attention2, self).build(input_shape)
         # Set input spec.
         self.input_spec = InputSpec(ndim=4,
                                     axes={3: input_shape[-1]})
@@ -830,9 +878,9 @@ class Attention_2(Layer):
         return input_shape
 
 # google version of attention with SN
-class Attention_2SN(Layer):
+class Attention2SN(Layer):
     def __init__(self, ch, **kwargs):
-        super(Attention_2SN, self).__init__(**kwargs)
+        super(Attention2SN, self).__init__(**kwargs)
         self.channels = ch
         self.filters_f_g = self.channels // 8
         self.filters_h = self.channels // 2
@@ -887,7 +935,7 @@ class Attention_2SN(Layer):
                                    name='sn_o',
                                    trainable=False)
 
-        super(Attention_2SN, self).build(input_shape)
+        super(Attention2SN, self).build(input_shape)
         # Set input spec.
         self.input_spec = InputSpec(ndim=4,
                                     axes={3: input_shape[-1]})
