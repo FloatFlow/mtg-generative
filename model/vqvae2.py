@@ -17,8 +17,8 @@ import keras.backend as K
 import tensorflow as tf
 import tensorflow_probability as tfp
 
-from model.utils import CardGenerator, vq_latent_loss, zq_norm, ze_norm, pixelcnn_accuracy, label_generator
-from model.network_blocks import resblock_decoder, resblock_encoder, intro_pixelcnn_layer, pixelcnn_layer, multihead_attention
+from model.utils import CardGenerator, vq_latent_loss, zq_norm, ze_norm, pixelcnn_accuracy, label_generator, ImgGenerator
+from model.network_blocks import resblock_decoder, resblock_encoder, gated_masked_conv2d, multihead_attention, style_encoder_block, style_decoder_block, resblock
 from model.layers import VectorQuantizer
 
 
@@ -53,8 +53,9 @@ class VQVAE2():
                 os.makedirs(path)
         self.name = 'vqvae2'
         self.kernel_init = VarianceScaling(np.sqrt(2))
-        self.latent_dim = 64
-        self.k = 256
+        self.codebook_dim = 64
+        self.resblock_dim = 128
+        self.k = 64
         self.beta = 0.25
         self.conditional = True
         self.build_decoder()
@@ -65,42 +66,81 @@ class VQVAE2():
     ## All our architecture
     ###############################
 
-    def encoder_pass(self, inputs, ch=16):
-        x = resblock_encoder(
-                inputs,
-                ch,
-                downsample=False,
-                kernel_init=self.kernel_init
-                ) #256x16
-
+    def encoder_pass(self, inputs, ch=32):
+        x = Conv2D(
+            filters=ch,
+            kernel_size=4,
+            strides=2,
+            padding='same',
+            kernel_initializer=self.kernel_init
+            )(inputs)
+        x = Activation('relu')(x) #128x32
         ch *= 2
-        x = resblock_encoder(
+        x = Conv2D(
+            filters=ch,
+            kernel_size=4,
+            strides=2,
+            padding='same',
+            kernel_initializer=self.kernel_init
+            )(x)
+        x = Activation('relu')(x) #64x64
+
+        x = Conv2D(
+            filters=ch,
+            kernel_size=3,
+            strides=1,
+            padding='same',
+            kernel_initializer=self.kernel_init
+            )(x)
+
+        x = resblock(
             x,
             ch,
             kernel_init=self.kernel_init
-            ) #128x32
-
-        ch *= 2
-        x = resblock_encoder(
+            ) #64x64
+        x = resblock(
             x,
             ch,
             kernel_init=self.kernel_init
             ) #64x64
         feat64 = Conv2D(
-            filters=self.latent_dim,
+            filters=self.codebook_dim,
             kernel_size=3,
             padding='same',
             kernel_initializer=self.kernel_init
             )(x)
 
         ch *= 2
-        x = resblock_encoder(
+        x = Conv2D(
+            filters=ch,
+            kernel_size=4,
+            strides=2,
+            padding='same',
+            kernel_initializer=self.kernel_init
+            )(x)
+        x = Activation('relu')(x) #32x128
+
+        x = Conv2D(
+            filters=ch,
+            kernel_size=3,
+            strides=1,
+            padding='same',
+            kernel_initializer=self.kernel_init
+            )(x)
+
+        x = resblock(
             x,
             ch,
             kernel_init=self.kernel_init
             ) #32x128
+        x = resblock(
+            x,
+            ch,
+            kernel_init=self.kernel_init
+            ) #32x128
+        
         feat32 = Conv2D(
-            filters=self.latent_dim,
+            filters=self.codebook_dim,
             kernel_size=3,
             padding='same',
             kernel_initializer=self.kernel_init
@@ -108,35 +148,83 @@ class VQVAE2():
         return (feat64, feat32)
 
     def build_decoder(self):
-        latent_in32 = Input((32, 32, self.latent_dim))
-        ch = self.latent_dim
-        x = resblock_decoder(
-            latent_in32,
-            ch,
-            kernel_init=self.kernel_init
-            )
-        
-        latent_in64 = Input((64, 64, self.latent_dim))
-        x = Concatenate(axis=-1)([x, latent_in64])
-        x = resblock_decoder(
+        latent_in32 = Input((32, 32, self.codebook_dim))
+        ch = self.codebook_dim*2
+        x = Conv2D(
+            filters=ch,
+            kernel_size=3,
+            strides=1,
+            padding='same',
+            kernel_initializer=self.kernel_init
+            )(latent_in32)
+
+        x = resblock(
             x,
             ch,
-            upsample=False,
             kernel_init=self.kernel_init
-            )
+            ) #32x128
+        x = resblock(
+            x,
+            ch,
+            kernel_init=self.kernel_init
+            ) #32x128
+        
+        x = Conv2DTranspose(
+            filters=ch,
+            kernel_size=4,
+            strides=2,
+            padding='same',
+            kernel_initializer=self.kernel_init
+            )(x)
+        x = Activation('relu')(x) #64x128
+        
+        latent_in64 = Input((64, 64, self.codebook_dim))
+        ch = ch//2
+        x_64 = Conv2D(
+            filters=ch,
+            kernel_size=3,
+            strides=1,
+            padding='same',
+            kernel_initializer=self.kernel_init
+            )(latent_in64)
+        x = Concatenate(axis=-1)([x, x_64])
+        x = Conv2D(
+            filters=ch,
+            kernel_size=3,
+            strides=1,
+            padding='same',
+            kernel_initializer=self.kernel_init
+            )(x)
+
+        x = resblock(
+            x,
+            ch,
+            kernel_init=self.kernel_init
+            ) #64x64
+        x = resblock(
+            x,
+            ch,
+            kernel_init=self.kernel_init
+            ) #64x64
 
         ch = ch//2
-        x = resblock_decoder(
-            x,
-            ch,
-            kernel_init=self.kernel_init
-            )
+        x = Conv2DTranspose(
+            filters=ch,
+            kernel_size=4,
+            strides=2,
+            padding='same',
+            kernel_initializer=self.kernel_init
+            )(x)
+        x = Activation('relu')(x) #128x32
         ch = ch//2
-        x = resblock_decoder(
-            x,
-            ch,
-            kernel_init=self.kernel_init
-            )
+        x = Conv2DTranspose(
+            filters=ch,
+            kernel_size=4,
+            strides=2,
+            padding='same',
+            kernel_initializer=self.kernel_init
+            )(x)
+        x = Activation('relu')(x) #256x16
 
         x = Conv2D(
             filters=3,
@@ -213,7 +301,8 @@ class VQVAE2():
             loss=['mse', partial(vq_latent_loss, beta=self.beta), partial(vq_latent_loss, beta=self.beta)],
             metrics=[zq_norm, ze_norm]
             )
-        print(self.vq_vae.summary())
+        print(self.encoder.summary())
+        print(self.decoder.summary())
         print("Model Metrics: {}".format(self.vq_vae.metrics_names))
     
     def get_vq_vae_codebook(self):
@@ -222,24 +311,34 @@ class VQVAE2():
         return codebook
 
     def pixelcnn_pass(self, x, h, n_layers=20, attention=False):
-        v_stack, h_stack = intro_pixelcnn_layer(
-            x,
-            filter_size=(5, 5),
-            n_filters=self.latent_dim,
-            h=h
+
+        v_stack, h_stack = gated_masked_conv2d(
+            v_stack_in=x,
+            h_stack_in=x,
+            out_dim=self.k,
+            kernel=5,
+            mask='a',
+            residual=False,
+            context=h,
+            use_context=True
             )
+
         for _ in range(n_layers//5):
             for _ in range(5):
-                v_stack, h_stack = pixelcnn_layer(
-                    v_stack,
-                    h_stack,
-                    filter_size=(5, 5),
-                    h=h,
-                    n_filters=self.latent_dim)
+                v_stack, h_stack = gated_masked_conv2d(
+                    v_stack_in=v_stack,
+                    h_stack_in=h_stack,
+                    out_dim=self.k,
+                    kernel=5,
+                    mask='b',
+                    residual=True,
+                    context=h,
+                    use_context=True
+                    )
             if attention:
                 h_stack = multihead_attention(h_stack)
         x = Conv2D(
-            filters=self.latent_dim,
+            filters=self.k,
             kernel_size=1,
             padding='same',
             kernel_initializer=VarianceScaling(1)
@@ -253,34 +352,51 @@ class VQVAE2():
         return autoregression
 
     def build_pixelcnn(self, n_layers=20):
-        pixelcnn_prior_inputs_32 = Input((32, 32))
-        pixelcnn_prior_inputs_64 = Input((64, 64))
-        h = Input((5, ))
-        
-        z_q_32 = self.codes_sampler_32(pixelcnn_prior_inputs_32)
-        context_32 = self.pixelcnn_pass(z_q_32, h=h, n_layers=n_layers, attention=True)
-        context_pass = UpSampling2D(2)(context_32)
+        # top pixelcnn
+        pixelcnn_top_prior_inputs = Input((32, 32))
+        class_labels = Input((5, ))
+        z_q_top = self.codes_sampler_32(pixelcnn_top_prior_inputs)
+        top_prior = self.pixelcnn_pass(z_q_top, h=class_labels, n_layers=n_layers, attention=True)
+        top_sampled = Lambda(lambda x: tfp.distributions.Categorical(logits=x).sample())(top_prior)
 
-        z_q_64 = self.codes_sampler_64(pixelcnn_prior_inputs_64)
-        context_64 = self.pixelcnn_pass(z_q_64, h=context_pass, n_layers=n_layers)        
-        
-
-        # Distribution to sample from the pixelcnn
-        sampled_32 = Lambda(lambda x: tfp.distributions.Categorical(logits=x).sample())(context_32)
-        sampled_64 = Lambda(lambda x: tfp.distributions.Categorical(logits=x).sample())(context_64)
-
-        self.pixelcnn = Model(
-            [pixelcnn_prior_inputs_32, pixelcnn_prior_inputs_64, h],
-            [context_32, context_64]
+        self.top_pixelcnn = Model(
+            [pixelcnn_top_prior_inputs, class_labels],
+            top_prior
+            )
+        self.top_pixelsampler = Model(
+            [pixelcnn_top_prior_inputs, class_labels],
+            top_sampled
             )
 
-        self.pixel_sampler = Model(
-            [pixelcnn_prior_inputs_32, pixelcnn_prior_inputs_64, h],
-            [sampled_32, sampled_64]
+        # bottom pixelcnn
+        pixelcnn_bottom_prior_inputs = Input((64, 64))
+        top_context = Input((32, 32, self.codebook_dim))
+        context_pass = UpSampling2D(2)(top_context)
+        z_q_bottom = self.codes_sampler_64(pixelcnn_bottom_prior_inputs)
+        bottom_prior = self.pixelcnn_pass(z_q_bottom, h=context_pass, n_layers=n_layers)        
+        bottom_sampled = Lambda(lambda x: tfp.distributions.Categorical(logits=x).sample())(bottom_prior)
+        self.bottom_pixelcnn = Model(
+            [pixelcnn_bottom_prior_inputs, top_context],
+            bottom_prior
+            )
+        self.bottom_pixelsampler = Model(
+            [pixelcnn_bottom_prior_inputs, top_context],
+            bottom_sampled
+            )
+        
+        # build full pixelcnn
+        pixelcnn_prior_inputs_top = Input((32, 32))
+        pixelcnn_prior_inputs_bottom = Input((64, 64))
+        class_label = Input((5, ))
+        top_prior = self.top_pixelcnn([pixelcnn_prior_inputs_top, class_label])
+        bottom_prior = self.bottom_pixelcnn([pixelcnn_prior_inputs_bottom, top_prior])
+        self.pixelcnn = Model(
+            [pixelcnn_prior_inputs_top, pixelcnn_prior_inputs_bottom, class_label],
+            [top_prior, bottom_prior]
             )
 
         self.pixelcnn.compile(
-            optimizer=Adam(self.lr, beta_1=0.0, beta_2=0.999),
+            optimizer=Adam(self.lr),
             loss=[SparseCategoricalCrossentropy(from_logits=True), SparseCategoricalCrossentropy(from_logits=True)],
             metrics=[pixelcnn_accuracy, pixelcnn_accuracy]
             )
@@ -292,13 +408,13 @@ class VQVAE2():
     ###############################               
 
     def train(self, epochs):
-        card_generator = CardGenerator(
+        card_generator = ImgGenerator(
             img_dir=self.training_dir,
             batch_size=self.batch_size,
             n_cpu=self.n_cpu,
             img_dim=self.img_dim_x
             )
-        real_batch, real_labels = card_generator.next()
+        real_batch = card_generator.next()
         self.selected_samples = np.array(real_batch[:16])
         self.reconstruction_target(self.selected_samples, -1)
         self.reconstruction_validation(-1)
@@ -311,18 +427,18 @@ class VQVAE2():
 
             pbar = tqdm(total=n_batches)
             for batch_i in range(n_batches):
-                real_batch, real_labels = card_generator.next()
-                dummy32 = np.zeros((self.batch_size, 32, 32, self.latent_dim*2))
-                dummy64 = np.zeros((self.batch_size, 64, 64, self.latent_dim*2))
+                real_batch = card_generator.next()
+                dummy32 = np.zeros((self.batch_size, 32, 32, self.codebook_dim*2))
+                dummy64 = np.zeros((self.batch_size, 64, 64, self.codebook_dim*2))
 
                 _, recon_loss, kl_loss32, kl_loss64, _, _, vqnorm32, venorm32, vqnorm64, venorm64 = self.vq_vae.train_on_batch(
                     real_batch,
                     [real_batch, dummy32, dummy64]
                     )
                 recon_accum.append(recon_loss)
-                kl_accum.append(kl_loss32+kl_loss64)
-                vq_accum.append(vqnorm32+vqnorm64)
-                ve_accum.append(venorm32+venorm64)
+                kl_accum.append(np.mean([kl_loss32, kl_loss64]))
+                vq_accum.append(np.mean([vqnorm32, vqnorm64]))
+                ve_accum.append(np.mean([venorm32, venorm64]))
 
                 pbar.update()
             pbar.close()
@@ -349,17 +465,19 @@ class VQVAE2():
             img_dim=self.img_dim_x
             )
         
-        real_batch, real_labels = card_generator.next()
+        #self.generate_samples(-1)
 
         n_batches = card_generator.n_batches
         for epoch in range(epochs):
             losses = []
             accuracies = []
 
+            self.generate_from_random(-1)
             pbar = tqdm(total=n_batches)
             for batch_i in range(n_batches):
                 real_batch, real_labels = card_generator.next()
                 codebook_indices32, codebook_indices64 = self.encoder.predict(real_batch)
+                assert np.max(codebook_indices64) <= self.k
 
                 loss, _, _, acc32, acc64 = self.pixelcnn.train_on_batch(
                     [codebook_indices32, codebook_indices64, real_labels],
@@ -382,33 +500,53 @@ class VQVAE2():
             if epoch % self.save_freq == 0:
                 self.save_model_weights(epoch, np.mean(losses))
                 self.save_model_weights_extended(epoch, np.mean(losses))
+                self.generate_samples(epoch)
+
 
         card_generator.end()
 
-    def sample_from_prior(self, prior_model, class_labels, shape):
+    def sample_from_prior(self, class_labels):
         """sample from the PixelCNN prior, pixel by pixel"""
-        X = np.zeros(shape, dtype=np.int32)
-        pbar = tqdm(total=X.shape[1])
-        for i in range(X.shape[1]):
-            for j in range(X.shape[2]):
-                sampled = prior_model.predict([X, class_labels])
-                X[:, i, j] = sampled[:, i, j]
+        X_top = np.zeros((16, 32, 32), dtype=np.int32)
+        X_bottom = np.zeros((16, 64, 64), dtype=np.int32)
+        
+        pbar = tqdm(total=X_top.shape[1])
+        for i in range(X_top.shape[1]):
+            for j in range(X_top.shape[2]):
+                top_samples  = self.top_pixelsampler.predict([X_top, class_labels])
+                X_top[:, i, j] = top_samples[:, i, j]
             pbar.update()
         pbar.close()
-        return X
 
-    def generate_samples(self, n_batches):
-        pbar = tqdm(total=n_batches)
-        for i in range(n_batches):
-            class_labels = label_generator(16)
-            indices32 = self.sample_from_prior(self.pixelsampler32, class_labels, (16, 32, 32))
-            indices64 = self.sample_from_prior(self.pixelsampler64, class_labels, (16, 64, 64))
-            zq32 = self.codes_sampler_32(indices32)
-            zq64 = self.codes_sampler_64(indices64)
-            generated = self.decoder.predict([zq32, zq64])
-            self.reconstruction_target(generated, i)
+        top_context = self.top_pixelcnn.predict([X_top, class_labels])
+        pbar = tqdm(total=X_bottom.shape[1])
+        for k in range(X_bottom.shape[1]):
+            for l in range(X_bottom.shape[2]):
+                bottom_samples = self.bottom_pixelsampler.predict([X_bottom, top_context])
+                X_bottom[:, k, l] = bottom_samples[:, k, l]
             pbar.update()
         pbar.close()
+        
+        return X_top, X_bottom
+
+    def generate_samples(self, epoch):
+        print("Generating Samples from Prior...")
+        class_labels = label_generator(16)
+        indices32, indices64 = self.sample_from_prior(class_labels)
+        zq32 = self.codes_sampler_32.predict(indices32)
+        zq64 = self.codes_sampler_64.predict(indices64)
+        generated = self.decoder.predict([zq32, zq64], steps=1)
+        self.reconstruction_target(generated, epoch)
+
+    def generate_from_random(self, epoch):
+        print("Generating Naive Samples...")
+        top_indices = np.random.randint(0, self.k, size=(16, 32, 32))
+        bottom_indices = np.random.randint(0, self.k, size=(16, 64, 64))
+        zq32 = self.codes_sampler_32.predict(top_indices)
+        zq64 = self.codes_sampler_64.predict(bottom_indices)
+        generated = self.decoder.predict([zq32, zq64], steps=1)
+        self.reconstruction_target(generated, '{}-random'.format(epoch))
+
 
     ###############################
     ## Utilities
@@ -466,8 +604,8 @@ class VQVAE2():
         self.encoder.save_weights(encoder_savename)
 
     def save_model_weights_extended(self, epoch, loss):
-        model_names = ["pixelcnn", "pixelsampler"]
-        for i, model in enumerate([self.pixelcnn, self.pixel_sampler]):
+        model_names = ["pixelcnn", "top_pixelsampler", "bottom_pixelsampler"]
+        for i, model in enumerate([self.pixelcnn, self.top_pixelcnn, self.bottom_pixelsampler]):
             savename = os.path.join(
                 self.checkpoint_dir,
                 'vqvae_{}_weights_{}_{:.3f}.h5'.format(model_names[i], epoch, loss)

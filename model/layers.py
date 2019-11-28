@@ -5,76 +5,65 @@ from keras.layers import Layer, Dense, Conv2D, Conv2DTranspose, Embedding, Input
 import keras.backend as K
 #from keras.models import 
 import tensorflow as tf
+from keras import initializers
 from keras.initializers import VarianceScaling
 from keras.utils import conv_utils
 import keras
 
 from tensorflow.python.training import moving_averages
 
-class GatedCNN(Layer):
-    '''
-    Convolution layer with gated activation unit.
-    Adopted from https://github.com/suga93/pixelcnn_keras/blob/master/core/layers.py
-    '''
-    def __init__(
-        self,
-        n_filters,
-        stack_type,
-        v_map=None,
-        h=None,
-        crop_right=False,
-        **kwargs):
-        '''
-        Args:
-            n_filters (int)         : Number of the filters (feature maps)
-            stack_type (str)        : 'vertical' or 'horizontal'
-            v_map (numpy.ndarray)   : Vertical maps if feeding into horizontal stack. (default:None)
-            h (numpy.ndarray)       : Latent vector to model the conditional distribution p(x|h) (default:None)
-            crop_right (bool)       : if True, crop rightmost of the feature maps (mask A, introduced in [https://arxiv.org/abs/1601.06759] )
-        '''
-        super(GatedCNN, self).__init__(**kwargs)
-        self.n_filters = n_filters
-        self.v_map = v_map
-        self.h = h
-        self.crop_right = crop_right
-    def build(self, input_shape):
-        super(GatedCNN, self).build(input_shape)
-
-    def crop_right_func(self, x):
-        x_shape = K.int_shape(x)
-        return x[:,:,:x_shape[2]-1,:]
-
-    def call(self, xW):
-        '''calculate gated activation maps given input maps '''
-        if self.crop_right:
-            xW = self.crop_right_func(xW)
-
-        if self.v_map is not None:
-            xW = Add()([xW, self.v_map])
-        
-        if self.h is not None:
-            if len(K.int_shape(self.h)) == 2:
-                hV = Dense(2*self.n_filters)(self.h)
-                hV = Reshape((1, 1, 2*self.n_filters))(hV)
-            else:
-                hV = Conv2D(
-                    filters=2*self.n_filters,
-                    kernel_size=1,
-                    padding='same'
-                    )(self.h)
-            xW = xW + hV
-
-        xW_f = xW[:, :, :, :self.n_filters]
-        xW_g = xW[:, :, :, self.n_filters:]
-
-        xW_f = K.tanh(xW_f)
-        xW_g = K.sigmoid(xW_g)
-
-        res = Multiply()([xW_f, xW_g])
-        return res
+class MaskedConv2D(Layer):
+    """
+    Masked convolution
+    Adapted from https://www.kaggle.com/ameroyer/keras-vq-vae-for-image-generation
+    """
+    def __init__(self, kernel_size, out_dim, direction, mode, **kwargs):
+        self.direction = direction     # Horizontal or vertical
+        self.mode = mode               # Mask type "a" or "b"
+        self.kernel_size = kernel_size
+        self.out_dim = out_dim
+        super(MaskedConv2D, self).__init__(**kwargs)
+    
+    def build(self, input_shape):   
+        filter_mid_y = self.kernel_size[0] // 2
+        filter_mid_x = self.kernel_size[1] // 2        
+        in_dim = int(input_shape[-1])
+        w_shape = [self.kernel_size[0], self.kernel_size[1], in_dim, self.out_dim]
+        mask_filter = np.ones(w_shape, dtype=np.float32)
+        # Build the mask
+        if self.direction == "h":
+            mask_filter[filter_mid_y + 1:, :, :, :] = 0.
+            mask_filter[filter_mid_y, filter_mid_x + 1:, :, :] = 0.
+        elif self.direction == "v":
+            if self.mode == 'a':
+                mask_filter[filter_mid_y:, :, :, :] = 0.
+            elif self.mode == 'b':
+                mask_filter[filter_mid_y+1:, :, :, :] = 0.0
+        if self.mode == 'a':
+            mask_filter[filter_mid_y, filter_mid_x, :, :] = 0.0
+        # Create convolution layer parameters with masked kernel
+        mask_filter = K.constant(mask_filter)
+        self.W = mask_filter * self.add_weight(
+            name="W_{}".format(self.direction),
+            shape=w_shape,
+            trainable=True,
+            initializer='glorot_uniform'
+            )
+        self.b = self.add_weight(
+            name="v_b",
+            shape=[self.out_dim, ],
+            trainable=True,
+            initializer='zeros'
+            )
+        super(MaskedConv2D, self).build(input_shape)
+    
+    def call(self, inputs):
+        x = K.conv2d(inputs, self.W, strides=(1, 1))
+        x = K.bias_add(x, self.b)
+        return x
 
     def compute_output_shape(self, input_shape):
-        return (input_shape[0], input_shape[1], input_shape[1], input_shape[3]//2)
+        return (input_shape[0], input_shape[1], input_shape[2], self.out_dim)
 
 class VectorQuantizer(Layer):  
     def __init__(self, k, **kwargs):
@@ -177,27 +166,25 @@ class LowPassFilter2D(Layer):
 class LearnedConstantLatent(Layer):
     def __init__(self, latent_size=None, **kwargs):
         self.latent_size = latent_size
-        self.latent = None
         super(LearnedConstantLatent, self).__init__(**kwargs)
 
     def build(self, input_shape):
-        if self.latent == None:
-            weight_dim = input_shape[-1]
-        else:
-            weight_dim = self.latent_size
-        self.latent = self.add_weight(shape=(weight_dim, ),
+        if self.latent_size == None:
+            self.latent_size = input_shape[-1]
+
+        self.latent_weights = self.add_weight(shape=(4, 4, self.latent_size),
                                       name='learned_latent',
                                       initializer='ones')
         super(LearnedConstantLatent, self).build(input_shape)
 
     def call(self, inputs):
-        latent = self.latent * (K.constant(1.0)/ K.sqrt(K.mean(K.square(self.latent), axis=-1, keepdims=True) + K.epsilon()))
-        latent = K.expand_dims(latent, axis=0)
-        latent_expand = K.tile(latent, [K.shape(inputs)[0], 1])
+        batch_size = K.shape(inputs)[0]
+        latent_expand = K.expand_dims(self.latent_weights, axis=0)
+        latent_expand = K.tile(latent_expand, (batch_size, 1, 1, 1))
         return latent_expand
 
     def compute_output_shape(self, input_shape):
-        return input_shape
+        return (input_shape[0], 4, 4, self.latent_size)
 
 class LatentPixelNormalization(Layer):
     def __init__(self, **kwargs):
@@ -285,9 +272,12 @@ class InstanceNormalization(Layer):
         ndim = len(input_shape)
         if self.axis == 0:
             raise ValueError('Axis cannot be zero')
+
         if (self.axis is not None) and (ndim == 2):
             raise ValueError('Cannot specify axis for rank 1 tensor')
+
         self.input_spec = InputSpec(ndim=ndim)
+
         if self.axis is None:
             shape = (1,)
         else:
@@ -310,18 +300,27 @@ class InstanceNormalization(Layer):
     
     def call(self, inputs, training=None):
         input_shape = K.int_shape(inputs)
-        reduction_axes = list(range(1, len(input_shape)))
+        reduction_axes = list(range(0, len(input_shape)))
+
         if self.axis is not None:
             del reduction_axes[self.axis]
+
         del reduction_axes[0]
 
         mean = K.mean(inputs, reduction_axes, keepdims=True)
         stddev = K.std(inputs, reduction_axes, keepdims=True) + self.epsilon
-        
-        broadcast_gamma = K.reshape(self.gamma, broadcast_shape)
-        broadcast_beta = K.reshape(self.beta, broadcast_shape)
-        normed = (normed * broadcast_gamma) + broadcast_beta
+        normed = (inputs - mean) / stddev
 
+        broadcast_shape = [1] * len(input_shape)
+        if self.axis is not None:
+            broadcast_shape[self.axis] = input_shape[self.axis]
+
+        if self.scale:
+            broadcast_gamma = K.reshape(self.gamma, broadcast_shape)
+            normed = normed * broadcast_gamma
+        if self.center:
+            broadcast_beta = K.reshape(self.beta, broadcast_shape)
+            normed = normed + broadcast_beta
         return normed
     
     def get_config(self):
@@ -332,7 +331,7 @@ class InstanceNormalization(Layer):
             'center': self.center,
             'scale': self.scale
         }
-        base_config = super(AdaInstanceNormalization, self).get_config()
+        base_config = super(InstanceNormalization, self).get_config()
         return dict(list(base_config.items()) + list(config.items()))
     
     def compute_output_shape(self, input_shape):
@@ -398,7 +397,7 @@ class AdaInstanceNormalization(Layer):
     
         return input_shape[0]
 
-        
+'''
 class InstanceNormalization(Layer):
     """Instance normalization layer.
     Normalize the activations of the previous layer at each step,
@@ -536,7 +535,7 @@ class InstanceNormalization(Layer):
         }
         base_config = super(InstanceNormalization, self).get_config()
         return dict(list(base_config.items()) + list(config.items()))
-
+'''
 
 class GlobalSumPooling2D(Layer):
     def __init(self, **kwargs):

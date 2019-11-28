@@ -55,14 +55,16 @@ class StyleGAN():
                 os.makedirs(path)
         self.n_classes = n_classes
         
-        
         self.style_samples = np.random.normal(0, 0.8, size=(self.n_noise_samples, self.z_len))
-        self.label_samples = label_generator(self.n_noise_samples, seed=42, n_classes=2)
+        self.label_samples = label_generator(self.n_noise_samples)
         self.model_name = 'stylegan'
         self.latent_type = 'constant' # constant or learned
         self.gp_weight = 10 # is really gamma = 5 due to definition
-        self.loss_type = 'hinge'
+        self.loss_type = 'nonsat'
         self.kernel_init = VarianceScaling(scale=np.sqrt(2), mode='fan_in', distribution='normal')
+        self.build_generator()
+        self.build_discriminator()
+        self.build_model()
 
 
     ###############################
@@ -75,7 +77,7 @@ class StyleGAN():
     1024    64
     2048    128
     '''
-    def build_generator(self, ch=128):
+    def build_generator(self, ch=256):
         style_in = Input(shape=(self.z_len, ))
         label_in = Input(shape=(self.n_classes, ))
         label_embed = Dense(self.n_classes, kernel_initializer=self.kernel_init)(label_in)
@@ -92,16 +94,12 @@ class StyleGAN():
 
 
         latent_in = Input(shape=(self.z_len, ))
-        if self.latent_type == 'learned':
-            x = LearnedConstantLatent(latent_size=self.z_len*4*4)(latent_in)
-            x = Dense(units=4*4*self.z_len, kernel_initializer=VarianceScaling(scale=np.sqrt(2)/4, mode='fan_in', distribution='normal'))(x)
-            x = Reshape((4, 4, -1))(x)
-        else:
-            x = ConstantLatent()(latent_in)
+        x = LearnedConstantLatent()(latent_in)
 
         x = style_generator_block(x, style, ch, kernel_init=self.kernel_init, upsample=False) #4x128
         x = style_generator_block(x, style, ch, kernel_init=self.kernel_init) #8x128
         x = style_generator_block(x, style, ch, kernel_init=self.kernel_init) #16x128
+        ch = ch // 2
         x = style_generator_block(x, style, ch, kernel_init=self.kernel_init) #32x128
         ch = ch // 2
         x = style_generator_block(x, style, ch, kernel_init=self.kernel_init) #64x64
@@ -126,15 +124,10 @@ class StyleGAN():
         img_in = Input(shape=(self.img_dim_x, self.img_dim_y, self.img_depth))
         class_in = Input(shape=(self.n_classes, ))
         
-        x = ConvSN2D(filters=ch,
-                   kernel_size=1,
-                   padding='same',
-                   kernel_initializer=self.kernel_init)(img_in)
-        x = LeakyReLU(0.2)(x)
-        x = ConvSN2D(filters=ch,
+        x = Conv2D(filters=ch,
                    kernel_size=3,
                    padding='same',
-                   kernel_initializer=self.kernel_init)(x)
+                   kernel_initializer=self.kernel_init)(img_in)
         x = LeakyReLU(0.2)(x)
 
         ch *= 2
@@ -143,11 +136,12 @@ class StyleGAN():
         x = style_discriminator_block(x, ch, kernel_init=self.kernel_init) #64x64
         ch *= 2
         x = style_discriminator_block(x, ch, kernel_init=self.kernel_init) #32x128
+        ch *= 2
         x = style_discriminator_block(x, ch, kernel_init=self.kernel_init) #16x128
         x = style_discriminator_block(x, ch, kernel_init=self.kernel_init) #8x128
         x = style_discriminator_block(x, ch, kernel_init=self.kernel_init) #4x128
         x = MiniBatchStd()(x)
-        x = ConvSN2D(filters=ch,
+        x = Conv2D(filters=ch,
                    kernel_size=3,
                    padding='valid',
                    kernel_initializer=self.kernel_init)(x)
@@ -177,21 +171,10 @@ class StyleGAN():
     def build_model(self):
         d_optimizer = Adam(lr=self.d_lr, beta_1=0.0, beta_2=0.9)
         g_optimizer = Adam(lr=self.g_lr, beta_1=0.0, beta_2=0.9)
-        if self.loss_type == 'hinge':
-            loss_collection = [hinge_real_discriminator_loss,
-                               hinge_fake_discriminator_loss,
-                               hinge_generator_loss]
-        elif self.loss_type == 'wgan':
-            loss_collection = [wgan_loss, wgan_loss, wgan_loss]
-        elif self.loss_type == 'nonsaturating':
-            loss_collection = [nonsat_real_discriminator_loss,
-                               nonsat_fake_discriminator_loss,
-                               nonsat_generator_loss]
-        elif self.loss_type == 'mse':
-            loss_collection = ['mse', 'mse', 'mse']
-        else:
-            raise ValueError('{} is an invalid loss type. \
-                             Choose between "hinge","wgan", or "nonsaturating".'.format(self.loss_type))
+        loss_collection = [nonsat_real_discriminator_loss,
+                           nonsat_fake_discriminator_loss,
+                           nonsat_generator_loss]
+
 
         # build complete discriminator
         fake_in = Input(shape=(self.img_dim_x, self.img_dim_y, self.img_depth))

@@ -56,17 +56,17 @@ def hinge_generator_loss(y_true, y_pred):
 def wgan_loss(y_true, y_pred):
     return K.mean(y_true*y_pred)
 
-def nonsat_fake_discriminator_loss(y_true, y_pred):
+def nonsat_fake_discriminator_loss(y_true, y_pred, sample_weight=1):
     return K.mean(K.softplus(y_pred))
 
-def nonsat_real_discriminator_loss(y_true, y_pred):
-    return -K.softplus(y_pred)
+def nonsat_real_discriminator_loss(y_true, y_pred, sample_weight=1):
+    return K.mean(K.softplus(-y_pred))
 
-def nonsat_generator_loss(y_true, y_pred):
+def nonsat_generator_loss(y_true, y_pred, sample_weight=1):
     return K.mean(K.softplus(-y_pred))
 
 #r1/r2 gradient penalty
-def gradient_penalty_loss(y_true, y_pred, averaged_samples, weight=1):
+def gradient_penalty_loss(y_true, y_pred, averaged_samples, sample_weight=1):
     y_true = None
     gradients = K.gradients(y_pred, averaged_samples)[0]
     gradients_sqr = K.square(gradients)
@@ -75,7 +75,7 @@ def gradient_penalty_loss(y_true, y_pred, averaged_samples, weight=1):
     gradient_penalty = K.sqrt(gradient_penalty + K.epsilon())
     # weight * ||grad||^2
     # Penalize the gradient norm
-    return K.mean(gradient_penalty * weight)
+    return K.mean(gradient_penalty * sample_weight)
 
 def vq_latent_loss(y_true, y_pred, beta=1, sample_weight=1):
     y_true = None
@@ -217,7 +217,9 @@ def crop_square_from_rec(img, img_dim=256):
     return img
 
 def card_crop(img_path, img_dim=256):
-    img = cv2.imread(img_path)[:, :, ::-1]
+    #img = cv2.imread(img_path)[:, :, ::-1]
+    img = Image.open(img_path)
+    img = np.array(img.convert('RGB'))
     # randomly decide gamma and warmth augmentations
     change_warmth = np.random.randint(2)
     if change_warmth == 0:
@@ -308,13 +310,82 @@ def onehot_label_decoder(one_hot_label):
 ## Data Generator
 ####################################################
 
-class CardGenerator():
+class ImgGenerator():
     def __init__(self,
                  img_dir,
                  batch_size,
                  n_cpu,
                  img_dim,
                  file_type=('.jpg', '.png', '.jpeg', '.mp4')):
+        self.img_dir = img_dir
+        self.img_dim = img_dim
+        self.file_type = file_type
+        self.batch_size = batch_size
+        self.n_cpu = n_cpu
+        self.queue = Queue(maxsize=self.n_cpu*4)
+        self.lock = Lock()
+        self.run = True
+        self.counter = Value('i', 0)
+        self.generate_data_paths()
+
+        for _ in range(self.n_cpu):
+             p = Process(target=self.fetch_batch)
+             p.start()
+
+    def generate_data_paths(self):
+        img_paths = []
+        for file in os.listdir(self.img_dir):
+            if file.endswith(self.file_type):
+                img_paths.append(os.path.join(self.img_dir, file))
+
+        # store paths and labels
+        self.df = pd.DataFrame({'paths':img_paths})
+        self.n_batches = (self.df.shape[0]//self.batch_size) - 1
+        self.indices = np.arange(self.n_batches)
+
+    def fetch_batch(self):
+        while self.run:
+
+            while self.queue.full():
+                time.sleep(0.1)
+
+            self.lock.acquire()
+            idx = self.counter.value
+            self.counter.value += 1
+            if self.counter.value >= self.n_batches:
+                self.counter.value = 0
+                self.shuffle()
+            self.lock.release()
+
+            try:
+                positions = self.indices[idx*self.batch_size:(idx+1)*self.batch_size]
+                numpy_batch = np.array([card_crop(img_path, self.img_dim) for img_path in self.df['paths'].iloc[positions]])
+
+                if numpy_batch.shape == (self.batch_size, self.img_dim, self.img_dim, 3):
+                    self.queue.put(numpy_batch)
+            except ValueError:
+                #print("Warning: Batch Dropped")
+                continue
+
+    def next(self):
+        while self.queue.empty():
+            time.sleep(0.1)
+        return self.queue.get()
+
+    def shuffle(self):
+        random.shuffle(self.indices)
+
+    def end(self):
+        self.run = False
+        self.queue.close()
+
+class CardGenerator():
+    def __init__(self,
+                 img_dir,
+                 batch_size,
+                 n_cpu,
+                 img_dim,
+                 file_type=('.jpg', '.png', '.jpeg')):
         self.img_dir = img_dir
         self.img_dim = img_dim
         self.file_type = file_type
@@ -366,7 +437,7 @@ class CardGenerator():
                 if numpy_batch.shape == (self.batch_size, self.img_dim, self.img_dim, 3):
                     self.queue.put((numpy_batch, label_batch))
             except ValueError:
-                print("Warning: Batch Dropped")
+                #print("Warning: Batch Dropped")
                 continue
 
     def next(self):

@@ -7,3 +7,5 @@ pip install psutil
 pip install tensorflow_probability
 apt-get install libsm6 libxrender1 libfontconfig1
 apt update && apt install -y libsm6 libxext6
+apt install php php-common gcc
+apt install imagemagick

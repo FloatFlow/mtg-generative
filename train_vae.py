@@ -13,7 +13,7 @@ def parse_args():
     parser.add_argument(
         '--train',
         type=bool,
-        default=False
+        default=True
         )
     parser.add_argument(
         '--train_target',
@@ -50,37 +50,28 @@ def parse_args():
     parser.add_argument(
         '--encoder_weights',
         type=str,
-        default='logging/model_saves/vqvae_encoder_weights_120_0.009.h5'
+        default='logging/model_saves/vqvae_encoder_weights_90_0.011.h5'
         )
     parser.add_argument(
         '--decoder_weights',
         type=str,
-        default='logging/model_saves/vqvae_decoder_weights_120_0.009.h5'
+        default='logging/model_saves/vqvae_decoder_weights_90_0.011.h5'
         )
     parser.add_argument(
         '--load_pixelcnn_checkpoint',
         type=bool,
-        default=True)
+        default=False)
     parser.add_argument(
-        '--pixelcnn32_weights',
+        '--pixelcnn_weights',
         type=str,
-        default='logging/model_saves/vqvae_pixelcnn32_weights_200_2.875.h5'
+        default='logging/model_saves/vqvae_pixelcnn_weights_90_3.261.h5'
         )
     parser.add_argument(
-        '--pixelcnn64_weights',
+        '--prior_sampler_weights',
         type=str,
-        default='logging/model_saves/vqvae_pixelcnn64_weights_200_2.875.h5'
+        default='logging/model_saves/vqvae_pixelsampler_weights_90_3.261.h5'
         )
-    parser.add_argument(
-        '--prior_sampler32_weights',
-        type=str,
-        default='logging/model_saves/vqvae_pixelsampler32_weights_200_2.875.h5'
-        )
-    parser.add_argument(
-        '--prior_sampler64_weights',
-        type=str,
-        default='logging/model_saves/vqvae_pixelsampler64_weights_200_2.875.h5'
-        )
+
     
 
     # model parameters
@@ -155,22 +146,21 @@ def main():
             vae.train(args.epochs)
 
         else:
-            vae.build_pixelcnns_and_samplers()
+            vae.build_pixelcnn()
             if args.load_pixelcnn_checkpoint:
-                vae.pixelcnn32.load_weights(args.pixelcnn32_weights, by_name=True)
-                vae.pixelcnn64.load_weights(args.pixelcnn64_weights, by_name=True)
+                vae.pixelcnn.load_weights(args.pixelcnn_weights, by_name=True)
+                vae.pixel_sampler.load_weights(args.prior_sampler_weights, by_name=True)
                 print('Successfully loaded pixelcnn checkpoints...')
             vae.train_pixelcnn(args.epochs)
     else:
         vae.encoder.load_weights(args.encoder_weights, by_name=True)
         vae.decoder.load_weights(args.decoder_weights, by_name=True)
-        vae.build_pixelcnns_and_samplers()
-        vae.pixelcnn32.load_weights(args.pixelcnn32_weights, by_name=True)
-        vae.pixelcnn64.load_weights(args.pixelcnn64_weights, by_name=True)
-        vae.pixelsampler32.load_weights(args.prior_sampler32_weights, by_name=True)
-        vae.pixelsampler64.load_weights(args.prior_sampler64_weights, by_name=True)
+        vae.build_pixelcnn()
+        vae.pixelcnn.load_weights(args.pixelcnn_weights, by_name=True)
+        vae.pixelsampler.load_weights(args.prior_sampler_weights, by_name=True)
         print('Successfully loaded model checkpoints...')
-        vae.generate_samples(10)
+        for i in range(10):
+            vae.generate_samples(i)
 
 if __name__ == '__main__':
     main()
