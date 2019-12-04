@@ -114,6 +114,12 @@ def pixelcnn_accuracy(y_true, y_pred):
         )
     return acc
 
+def kl_loss(y_true, y_pred, z_mean, z_log_var):
+    kl_loss = 1 + z_log_var - K.square(z_mean) - K.exp(z_log_var)
+    kl_loss = K.sum(kl_loss, axis=-1)
+    kl_loss *= -0.5
+    return kl_loss
+
 ####################################################
 ## Image Preprocessing and loading
 ####################################################
@@ -267,14 +273,18 @@ def card_crop(img_path, img_dim=256):
     img = np.array(img).astype(np.float32)
     return img
 
-def label_generator(n_samples, n_shared_classes=2):
-    sample_list = list(itertools.permutations([1,0,0,0,0])) 
-    if n_shared_classes >= 2:
-        sample_list = sample_list + list(itertools.permutations([1,1,0,0,0]))
-    if n_shared_classes >= 3: 
-        sample_list = sample_list + list(itertools.permutations([1,1,1,0,0]))
-    random.shuffle(sample_list)
-    return np.array(sample_list[:n_samples])
+def label_generator(n_samples, n_shared_classes=1, single_class_weight=4):
+    class_labels = np.tile(np.identity(5), (single_class_weight*5, 1))
+
+    if (n_shared_classes > 1):
+       for i in range(1, 5):
+           new_double_class = np.identity(5) + np.roll(np.identity(5), i, axis=-1)
+           class_labels = np.concatenate(
+               [class_labels, new_double_class],
+               axis=0
+               )
+    np.random.shuffle(class_labels)
+    return class_labels[:n_samples, :]
 
 def onehot_label_encoder(str_label):
     # convert labels to one-hot encoded
@@ -311,12 +321,15 @@ def onehot_label_decoder(one_hot_label):
 ####################################################
 
 class ImgGenerator():
-    def __init__(self,
-                 img_dir,
-                 batch_size,
-                 n_cpu,
-                 img_dim,
-                 file_type=('.jpg', '.png', '.jpeg', '.mp4')):
+    def __init__(
+        self,
+        img_dir,
+        batch_size,
+        n_cpu,
+        img_dim,
+        labels=True,
+        file_type=('.jpg', '.png', '.jpeg', '.mp4')
+        ):
         self.img_dir = img_dir
         self.img_dim = img_dim
         self.file_type = file_type
@@ -362,7 +375,8 @@ class ImgGenerator():
                 numpy_batch = np.array([card_crop(img_path, self.img_dim) for img_path in self.df['paths'].iloc[positions]])
 
                 if numpy_batch.shape == (self.batch_size, self.img_dim, self.img_dim, 3):
-                    self.queue.put(numpy_batch)
+                    fake_labels = label_generator(self.batch_size)
+                    self.queue.put((numpy_batch, fake_labels))
             except ValueError:
                 #print("Warning: Batch Dropped")
                 continue

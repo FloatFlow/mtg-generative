@@ -1,6 +1,7 @@
 import argparse
 import keras.backend as K
-from model.stylegan import StyleGAN
+#from model.stylegan import StyleGAN
+from model.minigan import MiniGAN
 import psutil
 
 N_CPU = psutil.cpu_count()
@@ -74,7 +75,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    gan = StyleGAN(
+    gan = MiniGAN(
         img_dim_x=args.img_dim_x,
         img_dim_y=args.img_dim_y,
         img_depth=args.img_depth,

@@ -11,28 +11,27 @@ from model.layers import *
 ###############################################################################
 
 def adainstancenorm_zproj(x, z):
-    target_shape = K.int_shape(x)
-    gamma = Dense(units=target_shape[-1],
-                  use_bias=True,
-                  kernel_initializer='ones',
-                  bias_initializer='zeros')(z)
+    target_shape = K.int_shape(x)[-1]
+    gamma = Dense(
+        units=target_shape,
+        use_bias=True,
+        kernel_initializer='ones',
+        bias_initializer='zeros'
+        )(z)
     gamma = Reshape((1, 1, -1))(gamma)
-    beta = Dense(units=target_shape[-1],
-                  use_bias=True,
-                  kernel_initializer='zeros')(z) # this has to be init at zero or everything breaks
+    beta = Dense(
+        units=target_shape,
+        use_bias=True,
+        kernel_initializer='zeros'
+        )(z) # this has to be init at zero or everything breaks
     beta = Reshape((1, 1, -1))(beta)
 
     x = AdaInstanceNormalization()([x, beta, gamma])
     return x
 
-def epilogue_block(inputs,
-                   style,
-                   activation='leaky'):
-    x = NoiseLayer()(inputs)
-    if activation == 'leaky':
-        x = LeakyReLU(0.2)(x)
-    else:
-        x = Activation('relu')(x)
+def epilogue_block(inputs, style):
+    #x = NoiseLayer()(inputs)
+    x = LeakyReLU(0.2)(inputs)
     x = adainstancenorm_zproj(x, style)
     return x
 
@@ -53,7 +52,7 @@ def style_generator_block(
             padding='same',
             kernel_initializer=kernel_init
             )(inputs)
-        x = LowPassFilter2D()(x)
+        #x = LowPassFilter2D()(x)
     else:
         x = Conv2D(
             filters=output_dim,
@@ -79,7 +78,7 @@ def style_discriminator_block(
     output_dim,
     downsample=True,
     kernel_init='he_normal',
-    activation='relu'
+    activation='leaky'
     ):
     x = Conv2D(
         filters=output_dim,
@@ -87,13 +86,10 @@ def style_discriminator_block(
         padding='same',
         kernel_initializer=kernel_init
         )(inputs)
-    if activation == 'relu':
-        x = Activation('relu')(x)
-    else:
-        x = LeakyReLU(0.2)(x)
+    x = LeakyReLU(0.2)(x)
 
     if downsample:
-        x = LowPassFilter2D()(x)
+        #x = LowPassFilter2D()(x)
         x = Conv2D(
             filters=output_dim,
             kernel_size=3,
@@ -108,100 +104,35 @@ def style_discriminator_block(
             padding='same',
             kernel_initializer=kernel_init
             )(x)
-    if activation == 'relu':
-        x = Activation('relu')(x)
-    else:
-        x = LeakyReLU(0.2)(x)
+    x = LeakyReLU(0.2)(x)
 
     return x
-
-def style_decoder_block(
-    inputs,
-    output_dim,
-    upsample=True,
-    kernel_init='he_normal'
-    ):
-
-    # first conv block
-    if upsample:
-        x = Conv2DTranspose(
-            filters=output_dim,
-            kernel_size=3,
-            strides=2,
-            padding='same',
-            kernel_initializer=kernel_init
-            )(inputs)
-        x = LowPassFilter2D()(x)
-    else:
-        x = Conv2D(
-            filters=output_dim,
-            kernel_size=3,
-            padding='same',
-            kernel_initializer=kernel_init
-            )(inputs)
-    x = Activation('relu')(x)
-
-    # second conv block
-    x = Conv2D(
-        filters=output_dim,
-        kernel_size=3,
-        padding='same',
-        kernel_initializer=kernel_init
-        )(x)
-    x = Activation('relu')(x)
-
-    return x
-
-def style_encoder_block(
-    inputs,
-    output_dim,
-    downsample=True,
-    kernel_init='he_normal',
-    activation='relu'
-    ):
-    x = Conv2D(
-        filters=output_dim,
-        kernel_size=3,
-        padding='same',
-        kernel_initializer=kernel_init
-        )(inputs)
-    x = Activation('relu')(x)
-
-    if downsample:
-        x = LowPassFilter2D()(x)
-        x = Conv2D(
-            filters=output_dim,
-            kernel_size=3,
-            strides=2,
-            padding='same',
-            kernel_initializer=kernel_init
-            )(x)
-    else:
-        x = Conv2D(
-            filters=output_dim,
-            kernel_size=3,
-            padding='same',
-            kernel_initializer=kernel_init
-            )(x)
-    x = Activation('relu')(x)
-
-    return x
-
 
 ###############################################################################
 ## MiniGAN
 ###############################################################################
 
-def deep_biggan_generator_block(x, z, ch, upsample=True, kernel_init='he_normal', bias=False):
+def deep_biggan_generator_block(
+    x,
+    z,
+    ch,
+    upsample=True,
+    kernel_init='he_normal',
+    bias=True,
+    activation='relu'
+    ):
     # left path
-    xl = Lambda(lambda x: x[:,:,:,:ch])(x)
+    xl = Lambda(lambda x: x[..., :ch])(x)
     if upsample:
         xl = UpSampling2D((2,2), interpolation='nearest')(xl)
 
     # right path
     
     xr = adainstancenorm_zproj(x, z)
-    xr = Activation('relu')(xr)
+    if activation == 'relu':
+        xr = Activation('relu')(xr)
+    else:
+        xr = LeakyReLU(0.2)(xr)
     xr = ConvSN2D(filters=ch//4,
                   kernel_size=1,
                   strides=1,
@@ -210,7 +141,10 @@ def deep_biggan_generator_block(x, z, ch, upsample=True, kernel_init='he_normal'
                   kernel_initializer=kernel_init)(xr)
 
     xr = adainstancenorm_zproj(xr, z)
-    xr = Activation('relu')(xr)
+    if activation == 'relu':
+        xr = Activation('relu')(xr)
+    else:
+        xr = LeakyReLU(0.2)(xr)
     if upsample:
         xr = UpSampling2D((2,2), interpolation='nearest')(xr)
     xr = ConvSN2D(filters=ch//4,
@@ -221,7 +155,10 @@ def deep_biggan_generator_block(x, z, ch, upsample=True, kernel_init='he_normal'
                   kernel_initializer=kernel_init)(xr)
 
     xr = adainstancenorm_zproj(xr, z)
-    xr = Activation('relu')(xr)
+    if activation == 'relu':
+        xr = Activation('relu')(xr)
+    else:
+        xr = LeakyReLU(0.2)(xr)
     xr = ConvSN2D(filters=ch//4,
                   kernel_size=3,
                   strides=1,
@@ -230,7 +167,10 @@ def deep_biggan_generator_block(x, z, ch, upsample=True, kernel_init='he_normal'
                   kernel_initializer=kernel_init)(xr)
 
     xr = adainstancenorm_zproj(xr, z)
-    xr = Activation('relu')(xr)
+    if activation == 'relu':
+        xr = Activation('relu')(xr)
+    else:
+        xr = LeakyReLU(0.2)(xr)
     xr = ConvSN2D(filters=ch,
                   kernel_size=1,
                   strides=1,
@@ -241,10 +181,17 @@ def deep_biggan_generator_block(x, z, ch, upsample=True, kernel_init='he_normal'
     x = Add()([xl, xr])
     return x
 
-def deep_biggan_discriminator_block(x, ch, downsample=True, kernel_init='he_normal', bias=False):
+def deep_biggan_discriminator_block(
+    x,
+    ch,
+    downsample=True,
+    kernel_init='he_normal',
+    bias=True,
+    activation='relu'
+    ):
     # left path
     if downsample:
-        xl = AveragePooling2D((2,2))(x)
+        xl = AveragePooling2D(2)(x)
     else:
         xl = x
     input_channels = K.int_shape(xl)[-1]
@@ -259,7 +206,10 @@ def deep_biggan_discriminator_block(x, ch, downsample=True, kernel_init='he_norm
         xl = Concatenate()([xl, xl_l])
 
     # right path
-    xr = Activation('relu')(x)
+    if activation == 'relu':
+        xr = Activation('relu')(x)
+    else:
+        xr = LeakyReLU(0.2)(x)
     xr = ConvSN2D(filters=ch//4,
                   kernel_size=1,
                   strides=1,
@@ -267,7 +217,10 @@ def deep_biggan_discriminator_block(x, ch, downsample=True, kernel_init='he_norm
                   use_bias=bias,
                   kernel_initializer=kernel_init)(xr)
 
-    xr = Activation('relu')(xr)
+    if activation == 'relu':
+        xr = Activation('relu')(xr)
+    else:
+        xr = LeakyReLU(0.2)(xr)
     xr = ConvSN2D(filters=ch//4,
                   kernel_size=3,
                   strides=1,
@@ -275,7 +228,10 @@ def deep_biggan_discriminator_block(x, ch, downsample=True, kernel_init='he_norm
                   use_bias=bias,
                   kernel_initializer=kernel_init)(xr)
 
-    xr = Activation('relu')(xr)
+    if activation == 'relu':
+        xr = Activation('relu')(xr)
+    else:
+        xr = LeakyReLU(0.2)(xr)
     xr = ConvSN2D(filters=ch//4,
                   kernel_size=3,
                   strides=1,
@@ -283,10 +239,13 @@ def deep_biggan_discriminator_block(x, ch, downsample=True, kernel_init='he_norm
                   use_bias=bias,
                   kernel_initializer=kernel_init)(xr)
 
-    xr = Activation('relu')(xr)
+    if activation == 'relu':
+        xr = Activation('relu')(xr)
+    else:
+        xr = LeakyReLU(0.2)(xr)
     if downsample:
-        xr = AveragePooling2D((2,2))(xr)
-    xr = ConvSN2D(filters=ch,
+        xr = AveragePooling2D(2)(xr)
+    xr = ConvSN2D(filters=K.int_shape(xl)[-1],
                   kernel_size=1,
                   strides=1,
                   padding='same',
@@ -299,112 +258,6 @@ def deep_biggan_discriminator_block(x, ch, downsample=True, kernel_init='he_norm
 ###############################################################################
 ## Res Blocks
 ###############################################################################
-
-def resblock_decoder(
-    inputs,
-    output_dim,
-    upsample=True,
-    kernel_init=VarianceScaling(np.sqrt(2))
-    ):
-    if upsample:
-        x_skip = Conv2DTranspose(
-            filters=output_dim,
-            kernel_size=3,
-            strides=2,
-            padding='same',
-            kernel_initializer=kernel_init
-            )(inputs)
-    else:
-        x_skip = Conv2D(
-            filters=output_dim,
-            kernel_size=1,
-            padding='same',
-            kernel_initializer=kernel_init
-            )(inputs)
-
-    # first conv block
-    if upsample:
-        x = Conv2DTranspose(
-            filters=output_dim,
-            kernel_size=3,
-            strides=2,
-            padding='same',
-            kernel_initializer=kernel_init
-            )(inputs)
-        x = LowPassFilter2D()(x)
-    else:
-        x = Conv2D(
-            filters=output_dim,
-            kernel_size=3,
-            padding='same',
-            kernel_initializer=kernel_init
-            )(inputs)
-    x = Activation('relu')(x)
-    #x = InstanceNormalization()(x)
-
-    # second conv block
-    x = Conv2D(
-        filters=output_dim,
-        kernel_size=3,
-        padding='same',
-        kernel_initializer=kernel_init
-        )(x)
-    x = Activation('relu')(x)
-    #x = InstanceNormalization()(x)
-
-    x = Add()([x_skip, x])
-    return x
-
-def resblock_encoder(
-    inputs,
-    output_dim,
-    downsample=True,
-    kernel_init=VarianceScaling(np.sqrt(2))
-    ):
-    if downsample:
-        x_skip = Conv2D(
-            filters=output_dim,
-            kernel_size=3,
-            strides=2,
-            padding='same',
-            kernel_initializer=kernel_init
-            )(inputs)
-    else:
-        x_skip = Conv2D(
-            filters=output_dim,
-            kernel_size=1,
-            padding='same',
-            kernel_initializer=kernel_init
-            )(inputs)
-
-    x = Conv2D(
-        filters=output_dim,
-        kernel_size=3,
-        padding='same',
-        kernel_initializer=kernel_init
-        )(inputs)
-    x = Activation('relu')(x)
-
-    if downsample:
-        x = LowPassFilter2D()(x)
-        x = Conv2D(
-            filters=output_dim,
-            kernel_size=3,
-            strides=2,
-            padding='same',
-            kernel_initializer=kernel_init
-            )(x)
-    else:
-        x = Conv2D(
-            filters=output_dim,
-            kernel_size=3,
-            padding='same',
-            kernel_initializer=kernel_init
-            )(x)
-    x = Activation('relu')(x)
-
-    x = Add()([x, x_skip])
-    return x
 
 def resblock(
     inputs,

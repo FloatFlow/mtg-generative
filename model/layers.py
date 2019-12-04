@@ -98,6 +98,24 @@ class VectorQuantizer(Layer):
     def compute_output_shape(self, input_shape):
         return (input_shape[0], input_shape[1], input_shape[2])
 
+class ReparameterizationTrick(Layer):
+    def __init__(self, **kwargs):
+        super(ReparameterizationTrick, self).__init__(**kwargs)
+
+    def build(self, input_shape):
+        super(ReparameterizationTrick, self).build(input_shape)
+
+    def call(self, inputs):
+        z_mean, z_log_var = inputs
+        batch = K.shape(z_mean)[0]
+        dim = K.int_shape(z_mean)[1]
+        # by default, random_normal has mean = 0 and std = 1.0
+        epsilon = K.random_normal(shape=(batch, dim))
+        return z_mean + K.exp(0.5 * z_log_var) * epsilon
+
+    def compute_output_shape(self, input_shape):
+        return input_shape[0]
+
 class NoiseLayer(Layer):
     def __init__(self, **kwargs):
         super(NoiseLayer, self).__init__(**kwargs)
@@ -172,9 +190,11 @@ class LearnedConstantLatent(Layer):
         if self.latent_size == None:
             self.latent_size = input_shape[-1]
 
-        self.latent_weights = self.add_weight(shape=(4, 4, self.latent_size),
-                                      name='learned_latent',
-                                      initializer='ones')
+        self.latent_weights = self.add_weight(
+            shape=(4, 4, self.latent_size),
+            name='learned_latent',
+            initializer='ones'
+            )
         super(LearnedConstantLatent, self).build(input_shape)
 
     def call(self, inputs):
@@ -1419,7 +1439,8 @@ class ConvSN1D(Conv1D):
         else:
             self.bias = None
             
-        self.u = self.add_weight(shape=tuple([1, self.kernel.shape.as_list()[-1]]),
+        self.u = self.add_weight(
+            shape=tuple([1, self.kernel.shape.as_list()[-1]]),
                  initializer=initializers.RandomNormal(0, 1),
                  name='sn',
                  trainable=False)

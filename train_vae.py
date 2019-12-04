@@ -24,6 +24,7 @@ def parse_args():
     parser.add_argument(
         '--training_dir',
         type=str,
+        #default='agglomerated_images'
         default='mtg_images'
         )
     parser.add_argument(
@@ -50,12 +51,12 @@ def parse_args():
     parser.add_argument(
         '--encoder_weights',
         type=str,
-        default='logging/model_saves/vqvae_encoder_weights_90_0.011.h5'
+        default='logging/model_saves/vqvae_encoder_weights_60_0.012.h5'
         )
     parser.add_argument(
         '--decoder_weights',
         type=str,
-        default='logging/model_saves/vqvae_decoder_weights_90_0.011.h5'
+        default='logging/model_saves/vqvae_decoder_weights_60_0.012.h5'
         )
     parser.add_argument(
         '--load_pixelcnn_checkpoint',

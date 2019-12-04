@@ -1,6 +1,13 @@
-from model.utils import *
-from model.layers import *
-from model.network_blocks import *
+"""
+A smaller version of biggan
+Seems to work better than stylegan on small, diverse datasets
+"""
+from tqdm import tqdm
+import cv2
+from PIL import Image
+from keras.utils import plot_model
+from functools import partial
+
 from keras.layers import BatchNormalization, Dense, Reshape, Lambda, Multiply, Add, Layer
 from keras.layers import Activation, UpSampling2D, AveragePooling2D, GlobalAveragePooling2D, Input
 from keras.layers import Concatenate, Embedding, Flatten, LeakyReLU
@@ -8,12 +15,10 @@ from keras.models import Model
 from keras.optimizers import Adam
 import keras.backend as K
 from keras.engine.network import Network
-from tqdm import tqdm
-import cv2
-from PIL import Image
-from keras.utils import plot_model
-from functools import partial
 
+from model.utils import *
+from model.layers import *
+from model.network_blocks import *
 
 class MiniGAN():
     def __init__(self, 
@@ -52,11 +57,17 @@ class MiniGAN():
             if not os.path.isdir(path):
                 os.makedirs(path)
         self.n_classes = n_classes
-        
-        self.noise_samples = np.concatenate([np.random.normal(0,0.8,size=(self.n_noise_samples, self.z_len)), \
-                                            label_generator(self.n_noise_samples, seed=42)], axis=1)
+        self.name = 'minigan'
+        self.noise_samples = np.concatenate(
+            [np.random.normal(0,0.8,size=(self.n_noise_samples, self.z_len)), label_generator(self.n_noise_samples)],
+            axis=-1
+            )
 
         self.kernel_init = 'he_normal'
+        self.ch = 32
+        self.build_generator()
+        self.build_discriminator()
+        self.build_model()
 
 
     ###############################
@@ -69,91 +80,87 @@ class MiniGAN():
     1024    64
     2048    128
     '''
-    def build_generator(self, ch=1024):
+    def build_generator(self):
         model_in = Input(shape=(self.z_len+self.n_classes,))
-        x = Dense(4*4*ch)(model_in)
+        x = Dense(4*4*16*self.ch)(model_in)
         x = Reshape((4,4,-1))(x)
+        #x = LearnedConstantLatent()(style)
 
-        x = deep_resblock_up(x, model_in, ch, upsample=False)
-        x = deep_resblock_up(x, model_in, ch, upsample=True)
+        x = deep_biggan_generator_block(x, model_in, 16*self.ch, upsample=False)
+        x = deep_biggan_generator_block(x, model_in, 16*self.ch, upsample=True) #8x256
 
-        x = deep_resblock_up(x, model_in, ch, upsample=False)
-        ch = ch//2
-        x = deep_resblock_up(x, model_in, ch, upsample=True)
+        x = deep_biggan_generator_block(x, model_in, 16*self.ch, upsample=False)
+        x = deep_biggan_generator_block(x, model_in, 8*self.ch, upsample=True) #16x128
 
-        x = deep_resblock_up(x, model_in, ch, upsample=False)
-        #ch = ch//2 # no downchannel in biggan
-        x = deep_resblock_up(x, model_in, ch, upsample=True)
+        x = deep_biggan_generator_block(x, model_in, 8*self.ch, upsample=False)
+        x = deep_biggan_generator_block(x, model_in, 8*self.ch, upsample=True) #32x128
 
-        x = deep_resblock_up(x, model_in, ch, upsample=False)
-        ch = ch//2
-        x = deep_resblock_up(x, model_in, ch, upsample=True)
+        x = deep_biggan_generator_block(x, model_in, 8*self.ch, upsample=False)
+        x = deep_biggan_generator_block(x, model_in, 4*self.ch, upsample=True) #64x64
 
-        x = Attention_2SN(ch)(x)
+        x = Attention2SN(4*self.ch)(x)
 
-        x = deep_resblock_up(x, model_in, ch, upsample=False)
-        ch = ch//2
-        x = deep_resblock_up(x, model_in, ch, upsample=True)
+        x = deep_biggan_generator_block(x, model_in, 4*self.ch, upsample=False)
+        x = deep_biggan_generator_block(x, model_in, 2*self.ch, upsample=True) #128x32
 
-        x = deep_resblock_up(x, model_in, ch, upsample=False)
-        ch = ch//2
-        x = deep_resblock_up(x, model_in, ch, upsample=True)
+        x = deep_biggan_generator_block(x, model_in, 2*self.ch, upsample=False)
+        x = deep_biggan_generator_block(x, model_in, self.ch, upsample=True) #256x16
 
-        x = LeakyReLU(0.01)(x)
-        model_out = ConvSN2D(filters=3,
-                             kernel_size=3,
-                             strides=1,
-                             padding='same',
-                             use_bias=True,
-                             kernel_initializer=self.kernel_init,
-                             activation='tanh')(x)
+        x = InstanceNormalization()(x)
+        x = Activation('relu')(x)
+        model_out = ConvSN2D(
+            filters=3,
+            kernel_size=3,
+            strides=1,
+            padding='same',
+            use_bias=True,
+            kernel_initializer=self.kernel_init,
+            activation='tanh'
+            )(x)
 
         self.generator = Model(model_in, model_out)   
         print(self.generator.summary())   
 
 
-    def build_discriminator(self, ch=64):
+    def build_discriminator(self):
         model_in = Input(shape=(self.img_dim_x, self.img_dim_y, self.img_depth))
         class_in = Input(shape=(self.n_classes,))
-        x = ConvSN2D(filters=ch,
-                     kernel_size=3,
-                     strides=1,
-                     padding='same',
-                     use_bias=True,
-                     kernel_initializer=self.kernel_init)(model_in)
-        ch *= 2
-        x = deep_resblock_down(x, ch, downsample=True)
-        x = deep_resblock_down(x, ch, downsample=False)
+        x = ConvSN2D(
+            filters=self.ch,
+            kernel_size=3,
+            strides=1,
+            padding='same',
+            use_bias=True,
+            kernel_initializer=self.kernel_init
+            )(model_in)
+        x = deep_biggan_discriminator_block(x, 2*self.ch, downsample=True)
+        x = deep_biggan_discriminator_block(x, 2*self.ch, downsample=False)
 
-        ch *= 2
-        x = deep_resblock_down(x, ch, downsample=True)
-        x = deep_resblock_down(x, ch, downsample=False)
+        x = deep_biggan_discriminator_block(x, 4*self.ch, downsample=True)
+        x = deep_biggan_discriminator_block(x, 4*self.ch, downsample=False)
 
-        x = Attention_2SN(ch)(x)
+        x = Attention2SN(4*self.ch)(x)
 
-        ch *= 2
-        x = deep_resblock_down(x, ch, downsample=True)
-        x = deep_resblock_down(x, ch, downsample=False)
+        x = deep_biggan_discriminator_block(x, 8*self.ch, downsample=True)
+        x = deep_biggan_discriminator_block(x, 8*self.ch, downsample=False)
+        
+        x = deep_biggan_discriminator_block(x, 8*self.ch, downsample=True)
+        x = deep_biggan_discriminator_block(x, 8*self.ch, downsample=False)
 
-        #ch *= 2 # no channel scaling in biggan
-        x = deep_resblock_down(x, ch, downsample=True)
-        x = deep_resblock_down(x, ch, downsample=False)
+        x = deep_biggan_discriminator_block(x, 16*self.ch, downsample=True)
+        x = deep_biggan_discriminator_block(x, 16*self.ch, downsample=False)
 
-        ch *= 2
-        x = deep_resblock_down(x, ch, downsample=True)
-        x = deep_resblock_down(x, ch, downsample=False)
+        #x = MiniBatchStd()(x)
+        x = deep_biggan_discriminator_block(x, 16*self.ch, downsample=True)
+        x = deep_biggan_discriminator_block(x, 16*self.ch, downsample=False)
 
-        x = deep_resblock_down(x, ch, downsample=True)
-        x = deep_resblock_down(x, ch, downsample=False)
-
-        x = LeakyReLU(0.01)(x)
+        x = Activation('relu')(x)
         x = GlobalSumPooling2D()(x)
-        #x = MinibatchDiscrimination(16, 16)(x)
 
         # architecture of tail stem
         out = Dense(1)(x)
         #print('Pooling shape: {}'.format(x.shape))
-        y = Dense(1, use_bias=True)(class_in)
+        y = Dense(1)(class_in)
         #print('Embedding shape: {}'.format(y.shape))
         target_dim = x.shape[-1]
         y = Lambda(lambda x: K.tile(x, (1, target_dim)))(y)
@@ -178,8 +185,17 @@ class MiniGAN():
         fake_label = self.discriminator([fake_in, class_in])
         real_label = self.discriminator([real_in, class_in])
 
-        self.discriminator_model = Model([real_in, fake_in, class_in], [real_label, fake_label])
-        self.discriminator_model.compile(d_optimizer, loss=[real_discriminator_loss, fake_discriminator_loss])
+        self.discriminator_model = Model(
+            [real_in, fake_in, class_in],
+            [real_label, fake_label, real_label])
+        self.discriminator_model.compile(
+            d_optimizer,
+            loss=[
+                hinge_real_discriminator_loss,
+                hinge_fake_discriminator_loss,
+                partial(gradient_penalty_loss, averaged_samples=real_in)
+                ]
+            )
 
         self.frozen_discriminator.trainable = False
 
@@ -190,7 +206,7 @@ class MiniGAN():
         frozen_fake_label = self.frozen_discriminator([fake_img,class_in])
 
         self.generator_model = Model([z_in, class_in], frozen_fake_label)
-        self.generator_model.compile(g_optimizer, generator_loss)
+        self.generator_model.compile(g_optimizer, hinge_generator_loss)
         
         print(self.discriminator_model.summary())
         print(self.generator_model.summary())
@@ -200,29 +216,41 @@ class MiniGAN():
     ###############################               
 
     def train(self, epochs):
-
-        card_generator = CardGenerator(img_dir=self.training_dir,
-                                       batch_size=self.batch_size,
-                                       n_cpu=self.n_cpu,
-                                       img_dim=self.img_dim_x)
-        n_batches = card_generator.n_batches
+        card_generator = CardGenerator(
+            img_dir=self.training_dir,
+            batch_size=self.batch_size,
+            n_cpu=self.n_cpu,
+            img_dim=self.img_dim_x
+            )
+        img_generator = ImgGenerator(
+            img_dir='agglomerated_images',
+            batch_size=self.batch_size,
+            n_cpu=self.n_cpu,
+            img_dim=self.img_dim_x
+            )
+        n_batches = card_generator.n_batches*2
         for epoch in range(epochs):
             d_loss_accum = []
             g_loss_accum = []
 
             pbar = tqdm(total=n_batches)
             for batch_i in range(n_batches):
-                real_batch, real_labels = card_generator.next()
+                if batch_i % 2 == 0:
+                    real_batch, real_labels = card_generator.next()
+                else:
+                    real_batch, real_labels = img_generator.next()
 
                 noise = np.random.normal(0, 1, size=(self.batch_size, self.z_len))
-                noise_labels = np.concatenate([noise, real_labels], axis=1)
+                noise_labels = np.concatenate([noise, real_labels], axis=-1)
                 dummy = np.ones(shape=(self.batch_size,))
 
                 fake_batch = self.generator.predict(noise_labels)
                 
-                d_loss = self.discriminator_model.train_on_batch([real_batch, fake_batch, real_labels], [dummy, dummy])
-                d_loss = sum(d_loss)
-                d_loss_accum.append(d_loss)
+                d_loss = self.discriminator_model.train_on_batch(
+                    [real_batch, fake_batch, real_labels],
+                    [dummy, dummy, dummy]
+                    )
+                d_loss_accum.append(d_loss[0])
             
                 g_loss = self.generator_model.train_on_batch([noise_labels, real_labels], dummy)
                 g_loss_accum.append(g_loss)
@@ -231,14 +259,16 @@ class MiniGAN():
                 pbar.update()
             pbar.close()
 
-            print('{}/{} ----> d_loss: {}, g_loss: {}'.format(epoch, 
-                                                              epochs, 
-                                                              np.mean(d_loss_accum), 
-                                                              np.mean(g_loss_accum)))
+            print('{}/{} ----> d_loss: {}, g_loss: {}'.format(
+                epoch, 
+                epochs, 
+                np.mean(d_loss_accum), 
+                np.mean(g_loss_accum)
+                ))
 
             if epoch % self.save_freq == 0:
                 self.noise_validation(epoch)
-                self.save_model_weights(epoch, d_loss, g_loss)
+                self.save_model_weights(epoch, np.mean(d_loss_accum), np.mean(g_loss_accum))
 
             card_generator.shuffle()
 
@@ -266,14 +296,7 @@ class MiniGAN():
             img_grid[y:y+self.img_dim_y, x:x+self.img_dim_x, :] = img
 
         img_grid = Image.fromarray(img_grid.astype(np.uint8))
-        img_grid.save(os.path.join(self.validation_dir, "validation_img_{}.png".format(epoch)))
-
-
-    def noise_validation_wlabel(self):
-        pass
-
-    def predict_noise_wlabel_testing(self, label):
-        pass
+        img_grid.save(os.path.join(self.validation_dir, "{}_validation_img_{}.png".format(self.name, epoch)))
 
     def save_model_weights(self, epoch, d_loss, g_loss):
         if not os.path.isdir(self.checkpoint_dir):
@@ -282,7 +305,3 @@ class MiniGAN():
         discriminator_savename = os.path.join(self.checkpoint_dir, 'minigan_discriminator_weights_{}_{:.3f}.h5'.format(epoch, d_loss))
         self.generator.save_weights(generator_savename)
         self.discriminator.save_weights(discriminator_savename)
-
-    def load_model_weights(self, g_weight_path, d_weight_path):
-        self.generator.load_weights(g_weight_path, by_name=True)
-        self.discriminator.load_weights(d_weight_path, by_name=True)
