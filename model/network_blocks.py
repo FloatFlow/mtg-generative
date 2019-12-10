@@ -52,7 +52,7 @@ def style_generator_block(
             padding='same',
             kernel_initializer=kernel_init
             )(inputs)
-        #x = LowPassFilter2D()(x)
+        x = LowPassFilter2D()(x)
     else:
         x = Conv2D(
             filters=output_dim,
@@ -108,6 +108,134 @@ def style_discriminator_block(
 
     return x
 
+def styleres_generator_block(x, z, ch, upsample=True, kernel_init='he_normal', bias=True, activation='leaky'):
+    # left path
+    xl = Lambda(lambda x: x[:,:,:,:ch])(x)
+    if upsample:
+        xl = UpSampling2D((2,2), interpolation='nearest')(xl)
+
+    # right path
+    
+    xr = epilogue_block(x, z)
+    xr = ConvSN2D(
+        filters=ch//4,
+        kernel_size=1,
+        strides=1,
+        padding='same',
+        use_bias=bias,
+        kernel_initializer=kernel_init
+        )(xr)
+
+    xr = epilogue_block(xr, z)
+    if upsample:
+        xr = UpSampling2D((2,2), interpolation='nearest')(xr)
+    xr = ConvSN2D(
+        filters=ch//4,
+        kernel_size=3,
+        strides=1,
+        padding='same',
+        use_bias=bias,
+        kernel_initializer=kernel_init
+        )(xr)
+
+    xr = epilogue_block(xr, z)
+    xr = ConvSN2D(
+        filters=ch//4,
+        kernel_size=3,
+        strides=1,
+        padding='same',
+        use_bias=bias,
+        kernel_initializer=kernel_init
+        )(xr)
+
+    xr = epilogue_block(xr, z)
+    xr = ConvSN2D(
+        filters=ch,
+        kernel_size=1,
+        strides=1,
+        padding='same',
+        use_bias=bias,
+        kernel_initializer=kernel_init
+        )(xr)
+
+    x = Add()([xl, xr])
+    return x
+
+def styleres_discriminator_block(x, ch, downsample=True, kernel_init='he_normal', bias=True, activation='leaky'):
+    # left path
+    if downsample:
+        xl = AveragePooling2D((2,2))(x)
+    else:
+        xl = x
+    input_channels = K.int_shape(xl)[-1]
+    add_channels = ch-input_channels
+    if add_channels > 0:
+        xl_l = ConvSN2D(filters=add_channels,
+                        kernel_size=1,
+                        strides=1,
+                        padding='same',
+                        use_bias=bias,
+                        kernel_initializer=kernel_init)(xl)
+        xl = Concatenate()([xl, xl_l])
+
+    # right path
+    xr = LeakyReLU(0.2)(x)
+    xr = ConvSN2D(
+        filters=ch//4,
+        kernel_size=1,
+        strides=1,
+        padding='same',
+        use_bias=bias,
+        kernel_initializer=kernel_init
+        )(xr)
+
+    xr = LeakyReLU(0.2)(xr)
+
+    xr = ConvSN2D(
+        filters=ch//4,
+        kernel_size=3,
+        strides=1,
+        padding='same',
+        use_bias=bias,
+        kernel_initializer=kernel_init
+        )(xr)
+
+    xr = LeakyReLU(0.2)(xr)
+    if downsample:
+        xr = LowPassFilter2D()(xr)
+        xr = ConvSN2D(
+            filters=ch//4,
+            kernel_size=3,
+            strides=2,
+            padding='same',
+            use_bias=bias,
+            kernel_initializer=kernel_init
+            )(xr)
+    else:
+        xr = ConvSN2D(
+            filters=ch//4,
+            kernel_size=3,
+            strides=1,
+            padding='same',
+            use_bias=bias,
+            kernel_initializer=kernel_init
+            )(xr)
+
+    xr = LeakyReLU(0.2)(xr)
+
+    xr = ConvSN2D(
+        filters=ch,
+        kernel_size=1,
+        strides=1,
+        padding='same',
+        use_bias=bias,
+        kernel_initializer=kernel_init
+        )(xr)
+
+    x = Add()([xl, xr])
+    return x
+
+
 ###############################################################################
 ## MiniGAN
 ###############################################################################
@@ -119,7 +247,8 @@ def deep_biggan_generator_block(
     upsample=True,
     kernel_init='he_normal',
     bias=True,
-    activation='relu'
+    activation='relu',
+    scaling_factor=2
     ):
     # left path
     xl = Lambda(lambda x: x[..., :ch])(x)
@@ -133,7 +262,7 @@ def deep_biggan_generator_block(
         xr = Activation('relu')(xr)
     else:
         xr = LeakyReLU(0.2)(xr)
-    xr = ConvSN2D(filters=ch//4,
+    xr = ConvSN2D(filters=ch//scaling_factor,
                   kernel_size=1,
                   strides=1,
                   padding='same',
@@ -147,7 +276,7 @@ def deep_biggan_generator_block(
         xr = LeakyReLU(0.2)(xr)
     if upsample:
         xr = UpSampling2D((2,2), interpolation='nearest')(xr)
-    xr = ConvSN2D(filters=ch//4,
+    xr = ConvSN2D(filters=ch//scaling_factor,
                   kernel_size=3,
                   strides=1,
                   padding='same',
@@ -159,7 +288,7 @@ def deep_biggan_generator_block(
         xr = Activation('relu')(xr)
     else:
         xr = LeakyReLU(0.2)(xr)
-    xr = ConvSN2D(filters=ch//4,
+    xr = ConvSN2D(filters=ch//scaling_factor,
                   kernel_size=3,
                   strides=1,
                   padding='same',
@@ -187,7 +316,8 @@ def deep_biggan_discriminator_block(
     downsample=True,
     kernel_init='he_normal',
     bias=True,
-    activation='relu'
+    activation='relu',
+    scaling_factor=2
     ):
     # left path
     if downsample:
@@ -210,7 +340,7 @@ def deep_biggan_discriminator_block(
         xr = Activation('relu')(x)
     else:
         xr = LeakyReLU(0.2)(x)
-    xr = ConvSN2D(filters=ch//4,
+    xr = ConvSN2D(filters=ch//scaling_factor,
                   kernel_size=1,
                   strides=1,
                   padding='same',
@@ -221,7 +351,7 @@ def deep_biggan_discriminator_block(
         xr = Activation('relu')(xr)
     else:
         xr = LeakyReLU(0.2)(xr)
-    xr = ConvSN2D(filters=ch//4,
+    xr = ConvSN2D(filters=ch//scaling_factor,
                   kernel_size=3,
                   strides=1,
                   padding='same',
@@ -232,7 +362,7 @@ def deep_biggan_discriminator_block(
         xr = Activation('relu')(xr)
     else:
         xr = LeakyReLU(0.2)(xr)
-    xr = ConvSN2D(filters=ch//4,
+    xr = ConvSN2D(filters=ch//scaling_factor,
                   kernel_size=3,
                   strides=1,
                   padding='same',
@@ -374,16 +504,3 @@ def gated_masked_conv2d(v_stack_in, h_stack_in, out_dim, kernel, mask='b', resid
     if residual:
         h_stack_out = Add()([h_stack_in, h_stack_out])
     return v_stack_out, h_stack_out
-
-def multihead_attention(inputs, n_heads=8):
-    atten_outputs = []
-    for _ in range(n_heads):
-        atten_outputs.append(Attention()(inputs))
-        #atten_outputs.append(ScaledDotProductAttention()(inputs))
-    x = Concatenate(axis=-1)(atten_outputs)
-    x = Conv2D(
-        filters=K.int_shape(inputs)[-1],
-        kernel_size=1,
-        padding='same'
-        )(x)
-    return x

@@ -8,6 +8,7 @@ import tensorflow as tf
 from keras import initializers
 from keras.initializers import VarianceScaling
 from keras.utils import conv_utils
+from keras import regularizers, constraints
 import keras
 
 from tensorflow.python.training import moving_averages
@@ -689,7 +690,83 @@ class LayerNormalization(Layer):
 ##########################
 ## Attention Layers
 ##########################
+class AttentionBlock(Layer):
+    def __init__(self, **kwargs):
+        super(AttentionBlock, self).__init__(**kwargs)
 
+    def build(self, input_shape):
+        super(AttentionBlock, self).build(input_shape)
+
+    def call(self, inputs, **kwargs):
+        # check that the implementation matches exactly py torch.
+        keys, queries, values, original = inputs
+
+        logits = K.batch_dot(queries, K.permute_dimensions(keys, (0, 2, 1)))
+        mask = K.ones_like(logits) * np.triu((-np.inf) * np.ones(logits.shape.as_list()[1:]), k=1)
+        logits = mask + logits
+        probs = K.softmax(logits, axis=-1)
+        read = K.batch_dot(probs, values)
+        output = K.concatenate([original, read], axis=-1)
+        print("Warning - attention output: {}".format(K.int_shape(output)))
+        return output
+    def compute_output_shape(self, input_shape):
+        k_shape, q_shape, v_shape, _ = input_shape
+        return (k_shape[0], k_shape[1], k_shape[2]+q_shape[2]+v_shape[2])
+
+"""
+class AttentionBlock(Layer):
+    def __init__(self, dims, k_size, v_size, seq_len=None, **kwargs):
+        self.k_size = k_size
+        self.seq_len = seq_len
+        self.v_size = v_size
+        self.dims = dims
+        self.sqrt_k = np.sqrt(k_size)
+        self.keys_fc = None
+        self.queries_fc = None
+        self.values_fc = None
+        super(AttentionBlock, self).__init__(**kwargs)
+
+    def build(self, input_shape):
+        # https://stackoverflow.com/questions/54194724/how-to-use-keras-layers-in-custom-keras-layer
+        #self.keys_fc = Dense(self.k_size)
+        #self.keys_fc.build((None, self.dims))
+        #self._trainable_weights.extend(self.keys_fc.trainable_weights)
+#
+        #self.queries_fc = Dense(self.k_size)
+        #self.queries_fc.build((None, self.dims))
+        #self._trainable_weights.extend(self.queries_fc.trainable_weights)
+#
+        #self.values_fc = Dense(self.v_size)
+        #self.values_fc.build((None, self.dims))
+        #self._trainable_weights.extend(self.values_fc.trainable_weights)
+        super(AttentionBlock, self).build(input_shape)
+
+    def call(self, inputs, **kwargs):
+        # check that the implementation matches exactly py torch.
+        def hw_flatten(x):
+            return K.reshape(x, shape=[K.shape(x)[0], K.shape(x)[1]*K.shape(x)[2], K.shape(x)[-1]])
+
+        original_shape = K.shape(inputs)
+        inputs = hw_flatten(inputs)
+
+        keys = self.keys_fc(inputs)
+        queries = self.queries_fc(inputs)
+        values = self.values_fc(inputs)
+
+        logits = K.batch_dot(queries, K.permute_dimensions(keys, (0, 2, 1)))
+        mask = K.ones_like(logits) * np.triu((-np.inf) * np.ones(logits.shape.as_list()[1:]), k=1)
+        logits = mask + logits
+        probs = Softmax(axis=-1)(logits / self.sqrt_k)
+        read = K.batch_dot(probs, values)
+        output = K.concatenate([inputs, read], axis=-1)
+        #output = K.reshape(output, (original_shape[0], original_shape[1], original_shape[2], -1))
+        return output
+
+    #def compute_output_shape(self, input_shape):
+    #    output_shape = list(input_shape)
+    #    output_shape[-1] += self.v_size
+    #    return tuple(output_shape)
+"""
 class ScaledDotProductAttention(Layer):
     def __init__(self, **kwargs):
         super(ScaledDotProductAttention, self).__init__(**kwargs)
@@ -730,8 +807,12 @@ class ScaledDotProductAttention(Layer):
 
         s = tf.matmul(hw_flatten(v), hw_flatten(k), transpose_b=True)  # # [bs, N, N]
         s = s*self.gamma
-        beta = K.softmax(s, axis=-1)  # attention map
 
+        # masking
+        #mask = K.ones_like(s) * np.triu((-np.inf) * np.ones(s.shape.as_list()[1:]), k=1)
+        #s = mask + s
+
+        beta = K.softmax(s, axis=-1)  # attention map
         o = tf.matmul(beta, hw_flatten(q))
         outputs = K.reshape(o, shape=K.shape(inputs))  # [bs, h, w, C]
         return outputs+inputs
@@ -770,11 +851,15 @@ class Attention(Layer):
         self.bias_h = self.add_weight(shape=(self.filters_h,),
                                       initializer='zeros',
                                       name='bias_h')
+
+        # build masks
+
         super(Attention, self).build(input_shape)
         # Set input spec.
         self.input_spec = InputSpec(ndim=4,
                                     axes={3: input_shape[-1]})
         self.built = True
+
 
 
     def call(self, x):
@@ -797,6 +882,7 @@ class Attention(Layer):
         #s = K.batch_dot(hw_flatten(g), K.transpose(hw_flatten(f)))
 
         s = tf.matmul(hw_flatten(g), hw_flatten(f), transpose_b=True)  # # [bs, N, N]
+
 
         beta = K.softmax(s, axis=-1)  # attention map
 

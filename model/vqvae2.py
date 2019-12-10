@@ -18,7 +18,7 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 
 from model.utils import CardGenerator, vq_latent_loss, zq_norm, ze_norm, pixelcnn_accuracy, label_generator, ImgGenerator
-from model.network_blocks import gated_masked_conv2d, multihead_attention, resblock
+from model.network_blocks import gated_masked_conv2d, resblock
 from model.layers import VectorQuantizer
 
 
@@ -258,7 +258,7 @@ class VQVAE2():
         # build encoder/decoder for prior training later on
         self.encoder = Model(
             inputs=img_input,
-            outputs=[z_q_top, z_q_bottom],
+            outputs=[codebook_indices_top, codebook_indices_bottom],
             name='encoder'
             )
         decoder_input_top = Input((32, 32, self.codebook_dim))
@@ -276,6 +276,36 @@ class VQVAE2():
         codes_top = Concatenate(axis=-1)([z_e_top, z_q_top])
         codes_bottom = Concatenate(axis=-1)([z_e_bottom, z_q_bottom])
         self.vq_vae = Model(inputs=img_input, outputs=[reconstructed, codes_top, codes_bottom], name='vq-vae')
+
+        """
+        ## VQVAE model (inference)
+        codebook_indices_top = Input(shape=(32, 32), name='discrete_codes_top', dtype=tf.int32)
+        codebook_indices_bottom = Input(shape=(64, 64), name='discrete_codes_bottom', dtype=tf.int32)
+        z_q_top = sampling_layer_top(codebook_indices_top)
+        z_q_bottom = sampling_layer_bottom(codebook_indices_bottom)
+        generated = self.decoder([z_q_top, z_q_bottom])
+        self.vq_vae_sampler = Model(
+            inputs=[codebook_indices_top, codebook_indices_bottom],
+            outputs=generated,
+            name='vq-vae-sampler'
+            )
+        """
+        
+        ## Transition from codebook indices to model (for training the prior later)
+        indices_top = Input(shape=(32, 32), name='codes_sampler_inputs_top', dtype='int32')
+        z_q_top = sampling_layer_top(indices_top)
+        self.codes_sampler_top = Model(
+            inputs=indices_top,
+            outputs=z_q_top,
+            name="codes_sampler_top"
+            )
+        indices_bottom = Input(shape=(64, 64), name='codes_sampler_inputs_bottom', dtype='int32')
+        z_q_bottom = sampling_layer_top(indices_bottom)
+        self.codes_sampler_bottom = Model(
+            inputs=indices_bottom,
+            outputs=z_q_bottom,
+            name="codes_sampler_bottom"
+            )
 
         # compile our models
         self.vq_vae.compile(
@@ -310,8 +340,7 @@ class VQVAE2():
                     context=h,
                     use_context=True
                     )
-            if attention:
-                h_stack = multihead_attention(h_stack)
+
         x = Conv2D(
             filters=self.k,
             kernel_size=1,
@@ -327,42 +356,54 @@ class VQVAE2():
         return autoregression
 
     def build_pixelcnn(self, n_layers=20):
+        ## Transition from codebook indices to model (for the prior later)
+        vector_quantizer_top = self.vq_vae.get_layer('vector_quantizer_top')
+        vector_quantizer_bottom = self.vq_vae.get_layer('vector_quantizer_bottom')
+        sampling_layer_top = Lambda(lambda x: vector_quantizer_top.sample(K.cast(x, "int32")), name="sample_from_top_codebook")
+        sampling_layer_bottom = Lambda(lambda x: vector_quantizer_bottom.sample(K.cast(x, "int32")), name="sample_from_bottom_codebook")
+
         # top pixelcnn
-        z_q_top = Input((32, 32, self.codebook_dim))
+        top_codebook_indices = Input((32, 32))
+        z_q_top = self.codes_sampler_top(top_codebook_indices)
         class_labels = Input((5, ))
         top_prior = self.pixelcnn_pass(z_q_top, h=class_labels, n_layers=n_layers, attention=True)
         top_sampled = Lambda(lambda x: tfp.distributions.Categorical(logits=x).sample())(top_prior)
 
         self.top_pixelcnn = Model(
-            [z_q_top, class_labels],
+            [top_codebook_indices, class_labels],
             top_prior
             )
         self.top_pixelsampler = Model(
-            [z_q_top, class_labels],
+            [top_codebook_indices, class_labels],
             top_sampled
             )
 
         # bottom pixelcnn
-        z_q_bottom = Input((64, 64, self.codebook_dim))
+        bottom_codebook_indices = Input((64, 64))
+        z_q_bottom = self.codes_sampler_bottom(bottom_codebook_indices)
         top_context = Input((32, 32, self.codebook_dim))
         context_pass = UpSampling2D(2)(top_context)
         bottom_prior = self.pixelcnn_pass(z_q_bottom, h=context_pass, n_layers=n_layers)        
         bottom_sampled = Lambda(lambda x: tfp.distributions.Categorical(logits=x).sample())(bottom_prior)
         self.bottom_pixelcnn = Model(
-            [z_q_bottom, top_context],
+            [bottom_codebook_indices, top_context],
             bottom_prior
             )
         self.bottom_pixelsampler = Model(
-            [z_q_bottom, top_context],
+            [bottom_codebook_indices, top_context],
             bottom_sampled
             )
         
         # build full pixelcnn
-        pixelcnn_prior_inputs_top = Input((32, 32, self.codebook_dim))
-        pixelcnn_prior_inputs_bottom = Input((64, 64, self.codebook_dim))
+        pixelcnn_prior_inputs_top = Input((32, 32))
+        z_q_top = self.codes_sampler_top(pixelcnn_prior_inputs_top)
+        pixelcnn_prior_inputs_bottom = Input((64, 64))
+        z_q_bottom = self.codes_sampler_bottom(pixelcnn_prior_inputs_bottom)
         class_label = Input((5, ))
         top_prior = self.top_pixelcnn([pixelcnn_prior_inputs_top, class_label])
-        bottom_prior = self.bottom_pixelcnn([pixelcnn_prior_inputs_bottom, top_prior])
+        top_sampled = Lambda(lambda x: tfp.distributions.Categorical(logits=x).sample())(top_prior)
+        z_q_top_sampled = self.codes_sampler_top(top_sampled)
+        bottom_prior = self.bottom_pixelcnn([pixelcnn_prior_inputs_bottom, z_q_top_sampled])
         self.pixelcnn = Model(
             [pixelcnn_prior_inputs_top, pixelcnn_prior_inputs_bottom, class_label],
             [top_prior, bottom_prior]
@@ -389,7 +430,7 @@ class VQVAE2():
             )
         self.selected_samples, _ = card_generator.next()
         self.reconstruction_target(self.selected_samples, -1)
-        self.reconstruction_validation(-1)
+
         n_batches = card_generator.n_batches
         for epoch in range(epochs):
             recon_accum = []
@@ -425,7 +466,8 @@ class VQVAE2():
                 )
 
             if epoch % self.save_freq == 0:
-                self.reconstruction_validation(epoch)
+                reconstructed_imgs, _, _ = self.vq_vae.predict(self.selected_samples)
+                self.reconstruction_target(reconstructed_imgs, epoch)
                 self.save_model_weights(epoch, np.mean(recon_accum))
         card_generator.end()
 
@@ -448,14 +490,12 @@ class VQVAE2():
             pbar = tqdm(total=n_batches)
             for batch_i in range(n_batches):
                 real_batch, real_labels = card_generator.next()
-                z_q_top, z_q_bottom = self.encoder.predict(real_batch)
-                z_q_top_label = np.expand_dims(np.argmax(z_q_top, axis=-1), axis=-1)
-                z_q_bottom_label = np.expand_dims(np.argmax(z_q_bottom, axis=-1), axis=-1)
-                loss, _, _, acc32, acc64 = self.pixelcnn.train_on_batch(
-                    [z_q_top, z_q_bottom, real_labels],
-                    [z_q_top_label, z_q_bottom_label]
-                    )
 
+                top_codebook_indices, bottom_codebook_indices = self.encoder.predict(real_batch)
+                loss, _, _, acc32, acc64 = self.pixelcnn.train_on_batch(
+                    [top_codebook_indices, bottom_codebook_indices, real_labels],
+                    [np.expand_dims(top_codebook_indices, axis=-1), np.expand_dims(bottom_codebook_indices, axis=-1)]
+                    )
                 losses.append(loss)
                 accuracies.append(np.mean([acc32, acc64]))
 
@@ -470,17 +510,16 @@ class VQVAE2():
                 )
 
             if epoch % self.save_freq == 0:
-                self.save_model_weights(epoch, np.mean(losses))
+                #self.save_model_weights(epoch, np.mean(losses))
                 self.save_model_weights_extended(epoch, np.mean(losses))
                 self.generate_samples(epoch)
-
 
         card_generator.end()
 
     def sample_from_prior(self, class_labels):
         """sample from the PixelCNN prior, pixel by pixel"""
-        X_top = np.zeros((16, 32, 32, self.codebook_dim), dtype=np.int32)
-        X_bottom = np.zeros((16, 64, 64, self.codebook_dim), dtype=np.int32)
+        X_top = np.zeros((16, 32, 32), dtype=np.int32)
+        X_bottom = np.zeros((16, 64, 64), dtype=np.int32)
         
         pbar = tqdm(total=X_top.shape[1])
         for i in range(X_top.shape[1]):
@@ -490,7 +529,7 @@ class VQVAE2():
             pbar.update()
         pbar.close()
 
-        top_context = self.top_pixelcnn.predict([X_top, class_labels])
+        top_context = self.codes_sampler_top.predict(X_top)
         pbar = tqdm(total=X_bottom.shape[1])
         for k in range(X_bottom.shape[1]):
             for l in range(X_bottom.shape[2]):
@@ -504,15 +543,18 @@ class VQVAE2():
     def generate_samples(self, epoch):
         print("Generating Samples from Prior...")
         class_labels = label_generator(16)
-        z_q_top, z_q_bottom = self.sample_from_prior(class_labels)
+        indices_top, indices_bottom = self.sample_from_prior(class_labels)
+        z_q_top = self.codes_sampler_top.predict(indices_top)
+        z_q_bottom = self.codes_sampler_bottom.predict(indices_bottom)
         generated = self.decoder.predict([z_q_top, z_q_bottom], steps=1)
         self.reconstruction_target(generated, epoch)
 
     def generate_from_random(self, epoch):
         print("Generating Naive Samples...")
-        limit = np.sqrt(3/self.codebook_dim)
-        z_q_top = np.random.uniform(-limit, limit, size=(16, 32, 32, self.codebook_dim))
-        z_q_bottom = np.random.uniform(-limit, limit, size=(16, 64, 64, self.codebook_dim))
+        indices_top = np.random.randint(0, self.codebook_dim, (16, 32, 32))
+        indices_bottom = np.random.randint(0, self.codebook_dim, (16, 64, 64))
+        z_q_top = self.codes_sampler_top.predict(indices_top)
+        z_q_bottom = self.codes_sampler_bottom.predict(indices_bottom)
         generated = self.decoder.predict([z_q_top, z_q_bottom], steps=1)
         self.reconstruction_target(generated, '{}-random'.format(epoch))
 
@@ -520,28 +562,6 @@ class VQVAE2():
     ###############################
     ## Utilities
     ###############################  
-
-    def reconstruction_validation(self, epoch):
-        print('Generating Images...')
-        if not os.path.isdir(self.validation_dir):
-            os.mkdir(self.validation_dir)
-        reconstructed_imgs, _, _ = self.vq_vae.predict(self.selected_samples)
-        reconstructed_imgs = ((np.array(reconstructed_imgs)+1)*127.5).astype(np.uint8)
-
-        # fill a grid
-        grid_dim = int(np.sqrt(reconstructed_imgs.shape[0]))
-        img_grid = np.zeros(shape=(self.img_dim_x*grid_dim, 
-                                   self.img_dim_y*grid_dim,
-                                   self.img_depth))
-
-        positions = itertools.product(range(grid_dim), range(grid_dim))
-        for (x_i, y_i), img in zip(positions, reconstructed_imgs):
-            x = x_i * self.img_dim_x
-            y = y_i * self.img_dim_y
-            img_grid[y:y+self.img_dim_y, x:x+self.img_dim_x, :] = img
-
-        savename = os.path.join(self.validation_dir, "{}_validation_img_{}.png".format(self.name, epoch))
-        cv2.imwrite(savename, img_grid.astype(np.uint8)[..., ::-1])
 
     def reconstruction_target(self, target, n_batch):
         print('Generating Images...')
@@ -567,10 +587,12 @@ class VQVAE2():
     def save_model_weights(self, epoch, loss):
         if not os.path.isdir(self.checkpoint_dir):
             os.mkdir(self.checkpoint_dir)
-        vqvae_savename = os.path.join(self.checkpoint_dir, 'vqvae_weights_{}_{:.3f}.h5'.format(epoch, loss))
-        encoder_savename = os.path.join(self.checkpoint_dir, 'vqvae_encoder_weights_{}_{:.3f}.h5'.format(epoch, loss))
-        self.encoder.save_weights(encoder_savename)
-        self.vq_vae.save_weights(vqvae_savename)
+        modelnames = ['encoder', 'decoder', 'codes_sampler_top', 'codes_sampler_bottom', 'vqvae']
+        models = [self.encoder, self.decoder, self.codes_sampler_top, self.codes_sampler_bottom, self.vq_vae]
+        savenames = ['vqvae_{}_{}.h5'.format(name, epoch) for name, epoch in zip(modelnames, [epoch]*len(modelnames))]
+        savenames = [os.path.join(self.checkpoint_dir, sname) for sname in savenames]
+        for i, model in enumerate(models):
+            model.save_weights(savenames[i])
 
     def save_model_weights_extended(self, epoch, loss):
         model_names = ["pixelcnn", "top_pixelsampler", "bottom_pixelsampler"]

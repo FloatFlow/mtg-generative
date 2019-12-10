@@ -89,24 +89,25 @@ class MiniGAN():
         x = deep_biggan_generator_block(x, model_in, 16*self.ch, upsample=False)
         x = deep_biggan_generator_block(x, model_in, 16*self.ch, upsample=True) #8x256
 
-        x = deep_biggan_generator_block(x, model_in, 16*self.ch, upsample=False)
+        #x = deep_biggan_generator_block(x, model_in, 16*self.ch, upsample=False)
         x = deep_biggan_generator_block(x, model_in, 8*self.ch, upsample=True) #16x128
 
-        x = deep_biggan_generator_block(x, model_in, 8*self.ch, upsample=False)
+        #x = deep_biggan_generator_block(x, model_in, 8*self.ch, upsample=False)
         x = deep_biggan_generator_block(x, model_in, 8*self.ch, upsample=True) #32x128
 
-        x = deep_biggan_generator_block(x, model_in, 8*self.ch, upsample=False)
+        #x = deep_biggan_generator_block(x, model_in, 8*self.ch, upsample=False)
         x = deep_biggan_generator_block(x, model_in, 4*self.ch, upsample=True) #64x64
 
         x = Attention2SN(4*self.ch)(x)
 
-        x = deep_biggan_generator_block(x, model_in, 4*self.ch, upsample=False)
+        #x = deep_biggan_generator_block(x, model_in, 4*self.ch, upsample=False)
         x = deep_biggan_generator_block(x, model_in, 2*self.ch, upsample=True) #128x32
 
-        x = deep_biggan_generator_block(x, model_in, 2*self.ch, upsample=False)
+        #x = deep_biggan_generator_block(x, model_in, 2*self.ch, upsample=False)
         x = deep_biggan_generator_block(x, model_in, self.ch, upsample=True) #256x16
 
-        x = InstanceNormalization()(x)
+        #x = InstanceNormalization()(x)
+        x = BatchNormalization()(x)
         x = Activation('relu')(x)
         model_out = ConvSN2D(
             filters=3,
@@ -134,25 +135,25 @@ class MiniGAN():
             kernel_initializer=self.kernel_init
             )(model_in)
         x = deep_biggan_discriminator_block(x, 2*self.ch, downsample=True)
-        x = deep_biggan_discriminator_block(x, 2*self.ch, downsample=False)
+        #x = deep_biggan_discriminator_block(x, 2*self.ch, downsample=False)
 
         x = deep_biggan_discriminator_block(x, 4*self.ch, downsample=True)
-        x = deep_biggan_discriminator_block(x, 4*self.ch, downsample=False)
+        #x = deep_biggan_discriminator_block(x, 4*self.ch, downsample=False)
 
         x = Attention2SN(4*self.ch)(x)
 
         x = deep_biggan_discriminator_block(x, 8*self.ch, downsample=True)
-        x = deep_biggan_discriminator_block(x, 8*self.ch, downsample=False)
+        #x = deep_biggan_discriminator_block(x, 8*self.ch, downsample=False)
         
         x = deep_biggan_discriminator_block(x, 8*self.ch, downsample=True)
-        x = deep_biggan_discriminator_block(x, 8*self.ch, downsample=False)
+        #x = deep_biggan_discriminator_block(x, 8*self.ch, downsample=False)
 
         x = deep_biggan_discriminator_block(x, 16*self.ch, downsample=True)
-        x = deep_biggan_discriminator_block(x, 16*self.ch, downsample=False)
+        #x = deep_biggan_discriminator_block(x, 16*self.ch, downsample=False)
 
-        #x = MiniBatchStd()(x)
+        x = MiniBatchStd()(x)
         x = deep_biggan_discriminator_block(x, 16*self.ch, downsample=True)
-        x = deep_biggan_discriminator_block(x, 16*self.ch, downsample=False)
+        #x = deep_biggan_discriminator_block(x, 16*self.ch, downsample=False)
 
         x = Activation('relu')(x)
         x = GlobalSumPooling2D()(x)

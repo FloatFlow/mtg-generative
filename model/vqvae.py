@@ -13,13 +13,15 @@ from keras.models import Model
 from keras.optimizers import Adam
 from keras.initializers import VarianceScaling
 from keras.losses import SparseCategoricalCrossentropy, CategoricalCrossentropy
+from keras.utils import to_categorical
 import keras.backend as K
 import tensorflow as tf
 import tensorflow_probability as tfp
 
+
 from model.utils import CardGenerator, vq_latent_loss, zq_norm, ze_norm, pixelcnn_accuracy, label_generator, ImgGenerator
-from model.network_blocks import gated_masked_conv2d, multihead_attention, resblock
-from model.layers import VectorQuantizer
+from model.network_blocks import gated_masked_conv2d, resblock
+from model.layers import VectorQuantizer, AttentionBlock, ScaledDotProductAttention
 
 
 class VQVAE():
@@ -201,10 +203,10 @@ class VQVAE():
         self.vq_vae = Model(inputs=encoder_inputs, outputs=[reconstructed, codes], name='vq-vae')
     
         ## VQVAE model (inference)
-        codebook_indices = Input(shape=(32, 32), name='discrete_codes', dtype=tf.int32)
-        z_q = sampling_layer(codebook_indices)
-        generated = self.decoder(z_q)
-        self.vq_vae_sampler = Model(inputs=codebook_indices, outputs=generated, name='vq-vae-sampler')
+        #codebook_indices = Input(shape=(32, 32), name='discrete_codes', dtype=tf.int32)
+        #z_q = sampling_layer(codebook_indices)
+        #generated = self.decoder(z_q)
+        #self.vq_vae_sampler = Model(inputs=codebook_indices, outputs=generated, name='vq-vae-sampler')
         
         ## Transition from codebook indices to model (for training the prior later)
         indices = Input(shape=(32, 32), name='codes_sampler_inputs', dtype='int32')
@@ -261,7 +263,8 @@ class VQVAE():
                     use_context=True
                     )
             if attention:
-                h_stack = multihead_attention(h_stack)
+                h_stack = ScaledDotProductAttention()(h_stack)
+
         x = Conv2D(
             filters=self.k,
             kernel_size=1,
@@ -278,19 +281,18 @@ class VQVAE():
 
     def build_pixelcnn(self, n_layers=20):
         # pixelcnn
-        pixelcnn_prior_inputs = Input((32, 32))
+        pixelcnn_prior_inputs = Input((32, 32, self.k))
         class_labels = Input((5, ))
-        z_q = self.codes_sampler_32(pixelcnn_prior_inputs)
-        prior = self.pixelcnn_pass(z_q, h=class_labels, n_layers=n_layers, attention=True)
+        prior = self.pixelcnn_pass(pixelcnn_prior_inputs, h=class_labels, n_layers=n_layers, attention=True)
         sampled = Lambda(lambda x: tfp.distributions.Categorical(logits=x).sample())(prior)
 
         self.pixelcnn = Model(
             [pixelcnn_prior_inputs, class_labels],
-            top_prior
+            prior
             )
         self.pixelsampler = Model(
             [pixelcnn_prior_inputs, class_labels],
-            top_sampled
+            sampled
             )
 
         self.pixelcnn.compile(
@@ -312,10 +314,10 @@ class VQVAE():
             n_cpu=self.n_cpu,
             img_dim=self.img_dim_x
             )
-        real_batch = card_generator.next()
-        self.selected_samples = np.array(real_batch[:16])
+
+        self.selected_samples, _ = card_generator.next()
         self.reconstruction_target(self.selected_samples, -1)
-        self.reconstruction_validation(-1)
+
         n_batches = card_generator.n_batches
         for epoch in range(epochs):
             recon_accum = []
@@ -325,10 +327,10 @@ class VQVAE():
 
             pbar = tqdm(total=n_batches)
             for batch_i in range(n_batches):
-                real_batch = card_generator.next()
+                real_batch, _ = card_generator.next()
                 dummy = np.zeros((self.batch_size, 32, 32, self.codebook_dim*2))
 
-                _, recon_loss, kl_loss, _, vqnorm, venorm = self.vq_vae.train_on_batch(
+                _, recon_loss, kl_loss, _, _, vqnorm, venorm = self.vq_vae.train_on_batch(
                     real_batch,
                     [real_batch, dummy]
                     )
@@ -350,7 +352,8 @@ class VQVAE():
                 )
 
             if epoch % self.save_freq == 0:
-                self.reconstruction_validation(epoch)
+                reconstructed_imgs, _ = self.vq_vae.predict(self.selected_samples)
+                self.reconstruction_target(reconstructed_imgs, epoch)
                 self.save_model_weights(epoch, np.mean(recon_accum))
         card_generator.end()
 
@@ -374,16 +377,14 @@ class VQVAE():
             for batch_i in range(n_batches):
                 real_batch, real_labels = card_generator.next()
                 codebook_indices = self.encoder.predict(real_batch)
-                assert np.max(codebook_indices64) <= self.k
-
-                loss, _, acc = self.pixelcnn.train_on_batch(
-                    [codebook_indices, real_labels],
+                one_hot = to_categorical(codebook_indices)
+                loss, acc = self.pixelcnn.train_on_batch(
+                    [one_hot, real_labels],
                     np.expand_dims(codebook_indices, axis=-1)
                     )
 
                 losses.append(loss)
                 accuracies.append(acc)
-
                 pbar.update()
             pbar.close()
 
@@ -404,17 +405,18 @@ class VQVAE():
 
     def sample_from_prior(self, class_labels):
         """sample from the PixelCNN prior, pixel by pixel"""
-        X = np.zeros((16, 32, 32), dtype=np.int32)
+        X = np.zeros((16, 32, 32, self.k), dtype=np.int32)
         
-        pbar = tqdm(total=X_top.shape[1])
-        for i in range(X_top.shape[1]):
-            for j in range(X_top.shape[2]):
+        pbar = tqdm(total=X.shape[1])
+        for i in range(X.shape[1]):
+            for j in range(X.shape[2]):
                 samples  = self.pixelsampler.predict([X, class_labels])
-                X[:, i, j] = samples[:, i, j]
+                samples = to_categorical(samples)
+                X[:, i, j, :] = samples[:, i, j, :]
             pbar.update()
         pbar.close()
         
-        return X
+        return np.argmax(X, axis=-1)
 
     def generate_samples(self, epoch):
         print("Generating Samples from Prior...")
@@ -435,28 +437,6 @@ class VQVAE():
     ###############################
     ## Utilities
     ###############################  
-
-    def reconstruction_validation(self, epoch):
-        print('Generating Images...')
-        if not os.path.isdir(self.validation_dir):
-            os.mkdir(self.validation_dir)
-        reconstructed_imgs, _, _ = self.vq_vae.predict(self.selected_samples)
-        reconstructed_imgs = ((np.array(reconstructed_imgs)+1)*127.5).astype(np.uint8)
-
-        # fill a grid
-        grid_dim = int(np.sqrt(reconstructed_imgs.shape[0]))
-        img_grid = np.zeros(shape=(self.img_dim_x*grid_dim, 
-                                   self.img_dim_y*grid_dim,
-                                   self.img_depth))
-
-        positions = itertools.product(range(grid_dim), range(grid_dim))
-        for (x_i, y_i), img in zip(positions, reconstructed_imgs):
-            x = x_i * self.img_dim_x
-            y = y_i * self.img_dim_y
-            img_grid[y:y+self.img_dim_y, x:x+self.img_dim_x, :] = img
-
-        savename = os.path.join(self.validation_dir, "{}_validation_img_{}.png".format(self.name, epoch))
-        cv2.imwrite(savename, img_grid.astype(np.uint8)[..., ::-1])
 
     def reconstruction_target(self, target, n_batch):
         print('Generating Images...')
@@ -482,14 +462,16 @@ class VQVAE():
     def save_model_weights(self, epoch, loss):
         if not os.path.isdir(self.checkpoint_dir):
             os.mkdir(self.checkpoint_dir)
-        decoder_savename = os.path.join(self.checkpoint_dir, 'vqvae_decoder_weights_{}_{:.3f}.h5'.format(epoch, loss))
-        encoder_savename = os.path.join(self.checkpoint_dir, 'vqvae_encoder_weights_{}_{:.3f}.h5'.format(epoch, loss))
-        self.decoder.save_weights(decoder_savename)
-        self.encoder.save_weights(encoder_savename)
+        modelnames = ['encoder', 'decoder', 'codes_sampler', 'vqvae']
+        models = [self.encoder, self.decoder, self.codes_sampler, self.vq_vae]
+        savenames = ['vqvae_{}_{}.h5'.format(name, epoch) for name, epoch in zip(modelnames, [epoch]*len(modelnames))]
+        savenames = [os.path.join(self.checkpoint_dir, sname) for sname in savenames]
+        for i, model in enumerate(models):
+            model.save_weights(savenames[i])
 
     def save_model_weights_extended(self, epoch, loss):
-        model_names = ["pixelcnn", "top_pixelsampler", "bottom_pixelsampler"]
-        for i, model in enumerate([self.pixelcnn, self.top_pixelcnn, self.bottom_pixelsampler]):
+        model_names = ["pixelcnn", "pixelsampler"]
+        for i, model in enumerate([self.pixelcnn, self.pixelsampler]):
             savename = os.path.join(
                 self.checkpoint_dir,
                 'vqvae_{}_weights_{}_{:.3f}.h5'.format(model_names[i], epoch, loss)

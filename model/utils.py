@@ -268,9 +268,6 @@ def card_crop(img_path, img_dim=256):
         img = img[:, ::-1, :]
 
     # normalize
-    img = img/127.5
-    img = img-1.0
-    img = np.array(img).astype(np.float32)
     return img
 
 def label_generator(n_samples, n_shared_classes=1, single_class_weight=4):
@@ -316,6 +313,12 @@ def onehot_label_decoder(one_hot_label):
             str_label.append('R')
     return str(str_label)
 
+def downsample_batch(img_batch, scale):
+    original_size = img_batch.shape[1]
+    return np.stack(
+        [np.array(Image.fromarray(img).resize((original_size//scale, original_size//scale), Image.LANCZOS)) for img in img_batch]
+        )
+
 ####################################################
 ## Data Generator
 ####################################################
@@ -328,12 +331,14 @@ class ImgGenerator():
         n_cpu,
         img_dim,
         labels=True,
+        multiscale=False,
         file_type=('.jpg', '.png', '.jpeg', '.mp4')
         ):
         self.img_dir = img_dir
         self.img_dim = img_dim
         self.file_type = file_type
         self.batch_size = batch_size
+        self.multiscale = multiscale
         self.n_cpu = n_cpu
         self.queue = Queue(maxsize=self.n_cpu*4)
         self.lock = Lock()
@@ -376,7 +381,13 @@ class ImgGenerator():
 
                 if numpy_batch.shape == (self.batch_size, self.img_dim, self.img_dim, 3):
                     fake_labels = label_generator(self.batch_size)
-                    self.queue.put((numpy_batch, fake_labels))
+                    if self.multiscale:
+                        multibatch = [(numpy_batch/127.5)-1]
+                        for i in [2, 4, 8, 16, 32, 64]:
+                            multibatch.append((downsample_batch(numpy_batch, i)/127.5)-1)
+                        self.queue.put((multibatch, fake_labels))
+                    else:
+                        self.queue.put(((numpy_batch/127.5)-1, fake_labels))
             except ValueError:
                 #print("Warning: Batch Dropped")
                 continue
@@ -399,12 +410,14 @@ class CardGenerator():
                  batch_size,
                  n_cpu,
                  img_dim,
+                 multiscale=False,
                  file_type=('.jpg', '.png', '.jpeg')):
         self.img_dir = img_dir
         self.img_dim = img_dim
         self.file_type = file_type
         self.batch_size = batch_size
         self.n_cpu = n_cpu
+        self.multiscale = multiscale
         self.queue = Queue(maxsize=self.n_cpu*4)
         self.lock = Lock()
         self.run = True
@@ -449,7 +462,14 @@ class CardGenerator():
                 label_batch = np.array([onehot_label_encoder(label) for label in self.df['labels'].iloc[positions]])
 
                 if numpy_batch.shape == (self.batch_size, self.img_dim, self.img_dim, 3):
-                    self.queue.put((numpy_batch, label_batch))
+                    fake_labels = label_generator(self.batch_size)
+                    if self.multiscale:
+                        multibatch = [(numpy_batch/127.5)-1]
+                        for i in [2, 4, 8, 16, 32, 64]:
+                            multibatch.append((downsample_batch(numpy_batch, i)/127.5)-1)
+                        self.queue.put((multibatch, fake_labels))
+                    else:
+                        self.queue.put(((numpy_batch/127.5)-1, fake_labels))
             except ValueError:
                 #print("Warning: Batch Dropped")
                 continue
