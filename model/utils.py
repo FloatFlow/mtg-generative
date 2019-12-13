@@ -295,7 +295,9 @@ def onehot_label_encoder(str_label):
     for k, v in lookup_dict.items():
         if k in str_label:
             one_hot_label += v
-    return one_hot_label
+    if np.sum(one_hot_label) == 0:
+        one_hot_label = np.array([0.2, 0.2, 0.2, 0.2, 0.2])
+    return one_hot_label/np.sum(one_hot_label)
 
 def onehot_label_decoder(one_hot_label):
     # convert labels to one-hot encoded
@@ -380,7 +382,8 @@ class ImgGenerator():
                 numpy_batch = np.array([card_crop(img_path, self.img_dim) for img_path in self.df['paths'].iloc[positions]])
 
                 if numpy_batch.shape == (self.batch_size, self.img_dim, self.img_dim, 3):
-                    fake_labels = label_generator(self.batch_size)
+                    #fake_labels = label_generator(self.batch_size)
+                    fake_labels = np.full(shape=(self.batch_size, 5), fill_value=0.2)
                     if self.multiscale:
                         multibatch = [(numpy_batch/127.5)-1]
                         for i in [2, 4, 8, 16, 32, 64]:

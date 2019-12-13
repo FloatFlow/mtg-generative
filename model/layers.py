@@ -1,7 +1,7 @@
 # imports
 import numpy as np
 from keras.layers import Layer, Dense, Conv2D, Conv2DTranspose, Embedding, InputSpec, Conv1D, \
-                         Multiply, Add, Conv3D, Reshape
+                         Multiply, Add, Conv3D, Reshape, UpSampling2D
 import keras.backend as K
 #from keras.models import 
 import tensorflow as tf
@@ -117,18 +117,119 @@ class ReparameterizationTrick(Layer):
     def compute_output_shape(self, input_shape):
         return input_shape[0]
 
+class ModulatedConv2D(Layer):
+    def __init__(
+        self,
+        kernel_size=3,
+        filters=256,
+        padding='same',
+        upsample=False,
+        downsample=False,
+        **kwargs
+        ):
+        if isinstance(kernel_size, int):
+            self.kernel_size = (kernel_size, kernel_size)
+        elif isinstance(kernel_size, tuple):
+            self.kernel_size = kernel_size
+        else:
+            raise ValueError('Invalid kernel size dtype for ModulatedConv2D')
+        self.filters = filters
+        self.padding = padding
+        self.upsample = upsample
+        self.downsample = downsample
+        super(ModulatedConv2D, self).__init__(**kwargs)
+
+    def build(self, input_shape):
+        img_shape, style_shape = input_shape
+        input_dim = img_shape[-1]
+        kernel_shape = self.kernel_size + (input_dim, self.filters)
+
+        self.kernel = self.add_weight(
+            shape=kernel_shape,
+            initializer=VarianceScaling(1),
+            name='kernel',
+            )
+        #super(ModulatedConv2D, self).build(input_shape)
+
+    def call(self, inputs):
+        input_vals, style = inputs
+        # modulate
+        mod_w = K.expand_dims(self.kernel, axis=0) * K.reshape(style, (-1, 1, 1, K.int_shape(style)[-1], 1))
+
+        # demodulate
+        mod_d = tf.math.rsqrt(tf.reduce_sum(tf.square(mod_w), axis=[1,2,3]) + K.epsilon())
+
+        # scale input activations
+        x = input_vals * K.reshape(style, (-1, 1, 1, K.int_shape(style)[-1]))
+
+        if self.upsample:
+            x = UpSampling2D(2, interpolation='bilinear')(x)
+            x = K.conv2d(
+                x,
+                self.kernel,
+                padding=self.padding
+                )
+        elif self.downsample:
+            x = K.conv2d(
+                x,
+                self.kernel,
+                strides=(2, 2),
+                padding=self.padding
+                )
+        else:
+            x = K.conv2d(
+                x,
+                self.kernel,
+                padding=self.padding
+                )
+
+        # scale output activations
+        x = x * K.reshape(mod_d, (-1, 1, 1, K.int_shape(mod_d)[-1]))
+        return x
+
+    def compute_output_shape(self, input_shape):
+        img_shape, style_shape = input_shape
+        if self.downsample:
+            img_shape = (img_shape[0], img_shape[1]//2, img_shape[2]//2, self.filters)
+        elif self.upsample:
+            img_shape = (img_shape[0], img_shape[1]*2, img_shape[2]*2, self.filters)
+        else:
+            img_shape = (img_shape[0], img_shape[1], img_shape[2], self.filters)
+        return img_shape
+
+class Bias(Layer):
+    def __init__(self, **kwargs):
+        super(Bias, self).__init__(**kwargs)
+
+    def build(self, input_shape):
+        self.bias = self.add_weight(
+            name='bias',
+            shape=(input_shape[-1]),
+            initializer='zeros',
+            trainable=True
+            )
+        super(Bias, self).build(input_shape)
+
+    def call(self, x):
+        return x + self.bias
+
+    def compute_output_shape(self, input_shape):
+        return input_shape
+
 class NoiseLayer(Layer):
     def __init__(self, **kwargs):
         super(NoiseLayer, self).__init__(**kwargs)
 
     def build(self, input_shape):
-        self.noise_weight = self.add_weight('noise_weight',
-                                            shape=[input_shape[-1]],
-                                            initializer='zeros')
+        self.noise_weight = self.add_weight(
+            'noise_weight',
+            shape=[1, ],
+            initializer='zeros'
+            )
 
     def call(self, x, **kwargs):
-        noise = K.random_normal([K.shape(x)[0], K.shape(x)[1], K.shape(x)[2], 1], dtype=x.dtype)  # [batch, h, w, c]
-        return x + noise * K.reshape(self.noise_weight, [1, 1, 1, -1])
+        noise = K.random_normal([1, K.shape(x)[1], K.shape(x)[2], 1], dtype=x.dtype)  # [batch, h, w, c]
+        return x + noise * self.noise_weight
 
     def compute_output_shape(self, input_shape):
         return input_shape
@@ -1795,11 +1896,11 @@ class ConvSN2DTranspose(Conv2DTranspose):
         #normalize it
         W_bar = W_reshaped / sigma
         #reshape weight tensor
-        if training in {0, False}:
+        #if training in {0, False}:
+        #    W_bar = K.reshape(W_bar, W_shape)
+        #else:
+        with tf.control_dependencies([self.u.assign(_u)]):
             W_bar = K.reshape(W_bar, W_shape)
-        else:
-            with tf.control_dependencies([self.u.assign(_u)]):
-                W_bar = K.reshape(W_bar, W_shape)
         self.kernel = W_bar
         
         outputs = K.conv2d_transpose(

@@ -1,7 +1,7 @@
 from keras.layers import BatchNormalization, Dense, Reshape, Lambda, Multiply, Add, Layer, \
                          Activation, UpSampling2D, AveragePooling2D, GlobalAveragePooling2D, Input, \
                          Concatenate, Embedding, Flatten, LeakyReLU, Cropping2D, GaussianNoise, \
-                         ZeroPadding2D
+                         ZeroPadding2D, add
 from keras.initializers import RandomNormal, VarianceScaling
 from model.layers import *
 
@@ -30,9 +30,10 @@ def adainstancenorm_zproj(x, z):
     return x
 
 def epilogue_block(inputs, style):
-    #x = NoiseLayer()(inputs)
-    x = LeakyReLU(0.2)(inputs)
+    x = NoiseLayer()(inputs)
+    #x = LeakyReLU(0.2)(x)
     x = adainstancenorm_zproj(x, style)
+    x = Activation('relu')(x)
     return x
 
 def style_generator_block(
@@ -108,131 +109,168 @@ def style_discriminator_block(
 
     return x
 
-def styleres_generator_block(x, z, ch, upsample=True, kernel_init='he_normal', bias=True, activation='leaky'):
+def style2_generator_layer(
+    inputs,
+    style,
+    output_dim,
+    upsample=False
+    ):
+    style = Dense(
+        K.int_shape(inputs)[-1],
+        kernel_initializer=VarianceScaling(1),
+        bias_initializer='ones'
+        )(style)
+    style = LeakyReLU(0.2)(style)
+    x = ModulatedConv2D(
+        filters=output_dim,
+        kernel_size=3,
+        padding='same',
+        upsample=upsample
+        )([inputs, style])
+    x = NoiseLayer()(x)
+    x = Bias()(x)
+    x = LeakyReLU(0.2)(x)
+    return x
+
+def to_rgb(inputs, style):
+    style = Dense(
+        K.int_shape(inputs)[-1],
+        kernel_initializer=VarianceScaling(1),
+        bias_initializer='ones'
+        )(style)
+    style = LeakyReLU(0.2)(style)
+    x = ModulatedConv2D(
+        filters=3,
+        kernel_size=1,
+        padding='same'
+        )([inputs, style])
+    x = Bias()(x)
+    x = Activation('tanh')(x)
+    return x
+
+def style2_discriminator_block(inputs, output_dim, downsample=False):
+    skip = inputs
+    skip = AveragePooling2D(2)(skip)
+    if K.int_shape(skip)[-1] != output_dim:
+        skip = Conv2D(
+            filters=output_dim,
+            kernel_size=1,
+            padding='same',
+            kernel_initializer=VarianceScaling(1)
+            )(skip)
+
+    x = Conv2D(
+        filters=output_dim,
+        kernel_size=3,
+        padding='same',
+        kernel_initializer=VarianceScaling(1)
+        )(inputs)
+    x = LeakyReLU(0.2)(x)
+    x = AveragePooling2D(2)(x)
+    x = Conv2D(
+        filters=output_dim,
+        kernel_size=3,
+        padding='same',
+        kernel_initializer=VarianceScaling(1)
+        )(x)
+    x = LeakyReLU(0.2)(x)
+
+    x = Lambda(lambda x: add(x) * (1/np.sqrt(2)))([x, skip])
+    return x
+
+
+def stylesnres_generator_block(
+    inputs,
+    style,
+    output_dim,
+    upsample=True,
+    kernel_init='he_normal'
+    ):
     # left path
-    xl = Lambda(lambda x: x[:,:,:,:ch])(x)
+    xl = Lambda(lambda x: x[..., :output_dim])(inputs)
     if upsample:
         xl = UpSampling2D((2,2), interpolation='nearest')(xl)
 
-    # right path
-    
-    xr = epilogue_block(x, z)
-    xr = ConvSN2D(
-        filters=ch//4,
-        kernel_size=1,
-        strides=1,
-        padding='same',
-        use_bias=bias,
-        kernel_initializer=kernel_init
-        )(xr)
-
-    xr = epilogue_block(xr, z)
+    # first conv block
     if upsample:
-        xr = UpSampling2D((2,2), interpolation='nearest')(xr)
-    xr = ConvSN2D(
-        filters=ch//4,
-        kernel_size=3,
-        strides=1,
-        padding='same',
-        use_bias=bias,
-        kernel_initializer=kernel_init
-        )(xr)
-
-    xr = epilogue_block(xr, z)
-    xr = ConvSN2D(
-        filters=ch//4,
-        kernel_size=3,
-        strides=1,
-        padding='same',
-        use_bias=bias,
-        kernel_initializer=kernel_init
-        )(xr)
-
-    xr = epilogue_block(xr, z)
-    xr = ConvSN2D(
-        filters=ch,
-        kernel_size=1,
-        strides=1,
-        padding='same',
-        use_bias=bias,
-        kernel_initializer=kernel_init
-        )(xr)
-
-    x = Add()([xl, xr])
-    return x
-
-def styleres_discriminator_block(x, ch, downsample=True, kernel_init='he_normal', bias=True, activation='leaky'):
-    # left path
-    if downsample:
-        xl = AveragePooling2D((2,2))(x)
-    else:
-        xl = x
-    input_channels = K.int_shape(xl)[-1]
-    add_channels = ch-input_channels
-    if add_channels > 0:
-        xl_l = ConvSN2D(filters=add_channels,
-                        kernel_size=1,
-                        strides=1,
-                        padding='same',
-                        use_bias=bias,
-                        kernel_initializer=kernel_init)(xl)
-        xl = Concatenate()([xl, xl_l])
-
-    # right path
-    xr = LeakyReLU(0.2)(x)
-    xr = ConvSN2D(
-        filters=ch//4,
-        kernel_size=1,
-        strides=1,
-        padding='same',
-        use_bias=bias,
-        kernel_initializer=kernel_init
-        )(xr)
-
-    xr = LeakyReLU(0.2)(xr)
-
-    xr = ConvSN2D(
-        filters=ch//4,
-        kernel_size=3,
-        strides=1,
-        padding='same',
-        use_bias=bias,
-        kernel_initializer=kernel_init
-        )(xr)
-
-    xr = LeakyReLU(0.2)(xr)
-    if downsample:
-        xr = LowPassFilter2D()(xr)
-        xr = ConvSN2D(
-            filters=ch//4,
+        x = ConvSN2DTranspose(
+            filters=output_dim,
             kernel_size=3,
             strides=2,
             padding='same',
-            use_bias=bias,
+            kernel_initializer=kernel_init
+            )(inputs)
+        #x = LowPassFilter2D()(x)
+    else:
+        x = ConvSN2D(
+            filters=output_dim,
+            kernel_size=3,
+            padding='same',
+            kernel_initializer=kernel_init
+            )(inputs)
+    x = epilogue_block(x, style)
+
+    # second conv block
+    x = ConvSN2D(
+        filters=output_dim,
+        kernel_size=3,
+        padding='same',
+        kernel_initializer=kernel_init
+        )(x)
+    x = epilogue_block(x, style)
+
+    return x
+
+def stylesnres_discriminator_block(
+    inputs,
+    output_dim,
+    downsample=True,
+    kernel_init='he_normal',
+    activation='relu'
+    ):
+    # left path
+    if downsample:
+        xl = AveragePooling2D(2)(inputs)
+    else:
+        xl = inputs
+    input_channels = K.int_shape(xl)[-1]
+    add_channels = output_dim-input_channels
+    if add_channels > 0:
+        xl_l = ConvSN2D(
+            filters=add_channels,
+            kernel_size=1,
+            strides=1,
+            padding='same',
+            kernel_initializer=kernel_init
+            )(xl)
+        xl = Concatenate()([xl, xl_l])
+
+    xr = ConvSN2D(
+        filters=output_dim,
+        kernel_size=3,
+        padding='same',
+        kernel_initializer=kernel_init
+        )(inputs)
+    xr = Activation('relu')(xr)
+
+    if downsample:
+        xr = ConvSN2D(
+            filters=output_dim,
+            kernel_size=3,
+            strides=2,
+            padding='same',
             kernel_initializer=kernel_init
             )(xr)
     else:
         xr = ConvSN2D(
-            filters=ch//4,
+            filters=output_dim,
             kernel_size=3,
-            strides=1,
             padding='same',
-            use_bias=bias,
             kernel_initializer=kernel_init
             )(xr)
-
-    xr = LeakyReLU(0.2)(xr)
-
-    xr = ConvSN2D(
-        filters=ch,
-        kernel_size=1,
-        strides=1,
-        padding='same',
-        use_bias=bias,
-        kernel_initializer=kernel_init
-        )(xr)
-
+    xr = Activation('relu')(xr)
     x = Add()([xl, xr])
+
     return x
 
 
@@ -248,7 +286,7 @@ def deep_biggan_generator_block(
     kernel_init='he_normal',
     bias=True,
     activation='relu',
-    scaling_factor=2
+    scaling_factor=4
     ):
     # left path
     xl = Lambda(lambda x: x[..., :ch])(x)
@@ -317,7 +355,7 @@ def deep_biggan_discriminator_block(
     kernel_init='he_normal',
     bias=True,
     activation='relu',
-    scaling_factor=2
+    scaling_factor=4
     ):
     # left path
     if downsample:
