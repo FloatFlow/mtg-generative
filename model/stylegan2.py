@@ -58,10 +58,8 @@ class StyleGAN2():
                 os.makedirs(path)
         self.n_classes = n_classes
         self.name = 'stylegan2'
-        self.noise_samples = np.concatenate(
-            [np.random.normal(0,0.8,size=(self.n_noise_samples, self.z_len)), label_generator(self.n_noise_samples)],
-            axis=-1
-            )
+        self.noise_samples = np.random.normal(0,0.8,size=(self.n_noise_samples, self.z_len))
+        self.label_samples = label_generator(self.n_noise_samples)
         self.build_generator()
         self.build_discriminator()
         self.build_model()
@@ -82,7 +80,10 @@ class StyleGAN2():
         class_in = Input(shape=(self.n_classes, ))
         class_embed = Dense(self.z_len, kernel_initializer=VarianceScaling(1))(class_in)
         style = Concatenate()([model_in, class_in])
-        for _ in range(2):
+        style = Lambda(
+            lambda x: x * tf.math.rsqrt(tf.reduce_mean(tf.square(x), axis=-1, keepdims=True) + K.epsilon())
+            )(style)
+        for _ in range(4):
             style = Dense(self.z_len, kernel_initializer=VarianceScaling(1))(style)
             style = LeakyReLU(0.2)(style)
 
@@ -290,7 +291,7 @@ class StyleGAN2():
         print('Generating Images...')
         if not os.path.isdir(self.validation_dir):
             os.mkdir(self.validation_dir)
-        predicted_imgs = self.generator.predict(self.noise_samples)
+        predicted_imgs = self.generator.predict([self.noise_samples, self.label_samples])
         predicted_imgs = [((img+1)*127.5).astype(np.uint8) for img in predicted_imgs]
 
         # fill a grid
@@ -316,6 +317,9 @@ class StyleGAN2():
             self.checkpoint_dir,
             '{}_generator_weights_{}_{:.3f}.h5'.format(self.name, epoch, g_loss)
             )
-        discriminator_savename = os.path.join(self.checkpoint_dir, '{}_discriminator_weights_{}_{:.3f}.h5'.format(epoch, d_loss))
+        discriminator_savename = os.path.join(
+            self.checkpoint_dir,
+            '{}_discriminator_weights_{}_{:.3f}.h5'.format(self.name, epoch, d_loss)
+            )
         self.generator.save_weights(generator_savename)
         self.discriminator.save_weights(discriminator_savename)

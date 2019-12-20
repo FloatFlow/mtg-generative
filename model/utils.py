@@ -201,24 +201,19 @@ def convert_temp(image, temp):
     image = np.array(image.convert('RGB', matrix))
     return image
 
-def crop_square_from_rec(img, img_dim=256):
-    # resize based on smallest axis
-    smallest_axis = img.shape[:2].index(min(img.shape[:2]))
-    scale = img_dim/img.shape[smallest_axis]
-    img = img_resize(img,
-                     int(img.shape[0]*scale),
-                     int(img.shape[1]*scale))
-
-    # crop square from image
-    smallest_axis = img.shape[:2].index(min(img.shape[:2]))
-    largest_axis = [axis for axis in [0, 1] if axis != smallest_axis][0]
-    largest_axis_len = img.shape[largest_axis]
-    possible_crops = largest_axis_len-img_dim
-    rand_position = np.random.randint(possible_crops)
-    if smallest_axis == 0:
-        img = img[:, rand_position:rand_position+img_dim, :]
-    else:
-        img = img[rand_position:rand_position+img_dim, :, :]
+def crop_square_from_rec(img, img_dim=512):
+    assert 0 not in img.shape
+    smallest_axis = np.argmin(img.shape[:2])
+    largest_axis = np.argmax(img.shape[:2])
+    smallest_shape = img.shape[smallest_axis]
+    largest_shape = img.shape[largest_axis]
+    n_positions = largest_shape - smallest_shape
+    if n_positions > 0:
+        jiggle = np.random.randint(n_positions)
+        if smallest_axis == 0:
+            img = img[:, jiggle:jiggle+smallest_shape, :]
+        else:
+            img = img[jiggle:jiggle+smallest_shape, :, :]
     img = img_resize(img, img_dim, img_dim)
     return img
 
@@ -236,31 +231,7 @@ def card_crop(img_path, img_dim=256):
         gamma = random.uniform(0.7, 1.3)
         img = adjust_gamma(img, gamma)
     ## image cropping and resizing
-    # resize if too small
-    if (img.shape[0] < img_dim) or (img.shape[1] < img_dim):
-        img = crop_square_from_rec(img, img_dim=img_dim)
-
-    # if image is too large
-    else:
-        random_method = np.random.randint(2)
-        # resize so smallest axis = img_dim, then crop
-        if random_method == 0:
-            img = crop_square_from_rec(img, img_dim=img_dim)
-        # take random crop from image
-        
-        else:
-            smallest_axis_len = min(img.shape[:2])
-            percent = np.random.randint(80, 99)/100
-            target_crop_size = int(smallest_axis_len*percent)
-            x_positions = img.shape[0]-target_crop_size
-            y_positions = img.shape[1]-target_crop_size
-            if (x_positions != 0) and (y_positions != 0):
-                rand_x = np.random.randint(x_positions)
-                rand_y = np.random.randint(y_positions)
-                img = img[rand_x:rand_x+target_crop_size,
-                          rand_y:rand_y+target_crop_size,
-                          :]
-            img = img_resize(img, img_dim, img_dim)
+    img = crop_square_from_rec(img, img_dim=img_dim)
 
     # randomly flip horizontally
     flip_val = np.random.randint(2)

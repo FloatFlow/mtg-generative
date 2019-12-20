@@ -149,18 +149,33 @@ class ModulatedConv2D(Layer):
             initializer=VarianceScaling(1),
             name='kernel',
             )
+        self.style_kernel = self.add_weight(
+            shape=(style_shape[-1], input_dim),
+            initializer=VarianceScaling(1),
+            name='style_kernel'
+            )
+        self.style_bias = self.add_weight(
+            shape=(input_dim, ),
+            initializer='ones',
+            name='style_bias'
+            )
         #super(ModulatedConv2D, self).build(input_shape)
-
+    
     def call(self, inputs):
         input_vals, style = inputs
+        # add minibatch dim
+        mod_w = K.expand_dims(self.kernel, axis=0) #(BkkIO) 
+
         # modulate
-        mod_w = K.expand_dims(self.kernel, axis=0) * K.reshape(style, (-1, 1, 1, K.int_shape(style)[-1], 1))
+        mod_style = K.dot(style, self.style_kernel)
+        mod_style = K.bias_add(mod_style, self.style_bias)
+        mod_w = mod_w * K.reshape(mod_style, (-1, 1, 1, K.int_shape(mod_style)[-1], 1)) #(BkkIO)
 
         # demodulate
         mod_d = tf.math.rsqrt(tf.reduce_sum(tf.square(mod_w), axis=[1,2,3]) + K.epsilon())
 
         # scale input activations
-        x = input_vals * K.reshape(style, (-1, 1, 1, K.int_shape(style)[-1]))
+        x = input_vals * K.reshape(mod_style, (-1, 1, 1, K.int_shape(mod_style)[-1])) #(BhwI)
 
         if self.upsample:
             x = UpSampling2D(2, interpolation='bilinear')(x)
@@ -184,9 +199,8 @@ class ModulatedConv2D(Layer):
                 )
 
         # scale output activations
-        x = x * K.reshape(mod_d, (-1, 1, 1, K.int_shape(mod_d)[-1]))
+        x = x * K.reshape(mod_d, (-1, 1, 1, K.int_shape(mod_d)[-1])) #(BhwO)
         return x
-
     def compute_output_shape(self, input_shape):
         img_shape, style_shape = input_shape
         if self.downsample:
