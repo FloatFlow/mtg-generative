@@ -68,23 +68,16 @@ class StyleGAN2():
     ###############################
     ## All our architecture
     ###############################
-
-    '''
-    To get # of filters to match:
-    G:      D:
-    1024    64
-    2048    128
-    '''
     def build_generator(self):
         model_in = Input(shape=(self.z_len, ))
         class_in = Input(shape=(self.n_classes, ))
-        class_embed = Dense(self.z_len, kernel_initializer=VarianceScaling(1))(class_in)
+        class_embed = Dense(self.z_len, kernel_initializer='he_uniform')(class_in)
         style = Concatenate()([model_in, class_in])
         style = Lambda(
             lambda x: x * tf.math.rsqrt(tf.reduce_mean(tf.square(x), axis=-1, keepdims=True) + K.epsilon())
             )(style)
         for _ in range(4):
-            style = Dense(self.z_len, kernel_initializer=VarianceScaling(1))(style)
+            style = Dense(units=self.z_len, kernel_initializer='he_uniform')(style)
             style = LeakyReLU(0.2)(style)
 
         ch = self.z_len
@@ -145,13 +138,13 @@ class StyleGAN2():
         x = Conv2D(
             filters=ch,
             kernel_size=1,
-            kernel_initializer=VarianceScaling(1)
+            kernel_initializer='he_uniform'
             )(model_in)
         x = LeakyReLU(0.2)(x)
 
         while ch < self.z_len:
-            ch = ch*2
             x = style2_discriminator_block(x, ch)
+            ch = ch*2
 
         while K.int_shape(x)[1] > 4:
             x = style2_discriminator_block(x, ch)
@@ -162,22 +155,22 @@ class StyleGAN2():
             filters=ch,
             kernel_size=3,
             padding='same',
-            kernel_initializer=VarianceScaling(1)
+            kernel_initializer='he_uniform'
             )(x)
         x = LeakyReLU(0.2)(x)
         x = Conv2D(
             filters=ch,
             kernel_size=4,
             padding='valid',
-            kernel_initializer=VarianceScaling(1)
+            kernel_initializer='he_uniform'
             )(x)
         x = LeakyReLU(0.2)(x)
 
         # architecture of tail stem
-        out = Dense(units=1, kernel_initializer=VarianceScaling(1))(x)
+        out = Dense(units=1, kernel_initializer='he_uniform')(x)
         embed_labels = Dense(
             K.int_shape(class_in)[-1],
-            kernel_initializer=VarianceScaling(1)
+            kernel_initializer='he_uniform'
             )(class_in)
         yh = Multiply()([out, embed_labels])
         model_out = Lambda(lambda x: K.sum(x, axis=-1))(yh)

@@ -158,7 +158,7 @@ def card_batch_collector(dir, batch_size, seed, file_type='.jpg'):
 
 def img_resize(img, y_dim, x_dim):
     img = Image.fromarray(img)
-    img = img.resize((y_dim, x_dim), Image.LANCZOS)
+    img = img.resize((512, 512), Image.LANCZOS)
     return np.array(img)
 
 def batch_resize(batch, dim):
@@ -286,10 +286,9 @@ def onehot_label_decoder(one_hot_label):
             str_label.append('R')
     return str(str_label)
 
-def downsample_batch(img_batch, scale):
-    original_size = img_batch.shape[1]
+def downsample_batch(img_batch, img_hw):
     return np.stack(
-        [np.array(Image.fromarray(img).resize((original_size//scale, original_size//scale), Image.LANCZOS)) for img in img_batch]
+        [np.array(Image.fromarray(img).resize((img_hw, img_hw), Image.LANCZOS)) for img in img_batch]
         )
 
 ####################################################
@@ -356,8 +355,8 @@ class ImgGenerator():
                     #fake_labels = label_generator(self.batch_size)
                     fake_labels = np.full(shape=(self.batch_size, 5), fill_value=0.2)
                     if self.multiscale:
-                        multibatch = [(numpy_batch/127.5)-1]
-                        for i in [2, 4, 8, 16, 32, 64]:
+                        multibatch = []
+                        for i in [4, 8, 16, 32, 64, 128, 256, 512]:
                             multibatch.append((downsample_batch(numpy_batch, i)/127.5)-1)
                         self.queue.put((multibatch, fake_labels))
                     else:

@@ -125,6 +125,8 @@ class ModulatedConv2D(Layer):
         padding='same',
         upsample=False,
         downsample=False,
+        kernel_initializer='he_uniform',
+        demodulate=True,
         **kwargs
         ):
         if isinstance(kernel_size, int):
@@ -137,6 +139,8 @@ class ModulatedConv2D(Layer):
         self.padding = padding
         self.upsample = upsample
         self.downsample = downsample
+        self.kernel_initializer = kernel_initializer
+        self.demodulate = demodulate
         super(ModulatedConv2D, self).__init__(**kwargs)
 
     def build(self, input_shape):
@@ -146,18 +150,8 @@ class ModulatedConv2D(Layer):
 
         self.kernel = self.add_weight(
             shape=kernel_shape,
-            initializer=VarianceScaling(1),
+            initializer=self.kernel_initializer,
             name='kernel',
-            )
-        self.style_kernel = self.add_weight(
-            shape=(style_shape[-1], input_dim),
-            initializer=VarianceScaling(1),
-            name='style_kernel'
-            )
-        self.style_bias = self.add_weight(
-            shape=(input_dim, ),
-            initializer='ones',
-            name='style_bias'
             )
         #super(ModulatedConv2D, self).build(input_shape)
     
@@ -167,15 +161,14 @@ class ModulatedConv2D(Layer):
         mod_w = K.expand_dims(self.kernel, axis=0) #(BkkIO) 
 
         # modulate
-        mod_style = K.dot(style, self.style_kernel)
-        mod_style = K.bias_add(mod_style, self.style_bias)
-        mod_w = mod_w * K.reshape(mod_style, (-1, 1, 1, K.int_shape(mod_style)[-1], 1)) #(BkkIO)
+        mod_w = mod_w * K.reshape(style, (-1, 1, 1, K.int_shape(style)[-1], 1)) #(BkkIO)
 
-        # demodulate
-        mod_d = tf.math.rsqrt(tf.reduce_sum(tf.square(mod_w), axis=[1,2,3]) + K.epsilon())
+        if self.demodulate:
+            # demodulate
+            mod_d = tf.math.rsqrt(tf.reduce_sum(tf.square(mod_w), axis=[1,2,3]) + K.epsilon())
 
         # scale input activations
-        x = input_vals * K.reshape(mod_style, (-1, 1, 1, K.int_shape(mod_style)[-1])) #(BhwI)
+        x = input_vals * K.reshape(style, (-1, 1, 1, K.int_shape(style)[-1])) #(BhwI)
 
         if self.upsample:
             x = UpSampling2D(2, interpolation='bilinear')(x)
@@ -197,9 +190,9 @@ class ModulatedConv2D(Layer):
                 self.kernel,
                 padding=self.padding
                 )
-
-        # scale output activations
-        x = x * K.reshape(mod_d, (-1, 1, 1, K.int_shape(mod_d)[-1])) #(BhwO)
+        if self.demodulate:
+            # scale output activations
+            x = x * K.reshape(mod_d, (-1, 1, 1, K.int_shape(mod_d)[-1])) #(BhwO)
         return x
     def compute_output_shape(self, input_shape):
         img_shape, style_shape = input_shape

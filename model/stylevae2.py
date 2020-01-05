@@ -16,7 +16,7 @@ import keras.backend as K
 import tensorflow as tf
 
 from model.utils import CardGenerator, label_generator, kl_loss
-from model.network_blocks import style_discriminator_block, style_generator_block
+from model.network_blocks import style2_discriminator_block, style2_generator_layer
 from model.layers import ReparameterizationTrick
 
 
@@ -63,70 +63,117 @@ class StyleVAE():
     ###############################
 
     def build_encoder(self, inputs, ch=16):
-        img_in = Input(shape=(self.img_dim_x, self.img_dim_y, self.img_depth))
+        model_in = Input(shape=(self.img_dim_x, self.img_dim_y, self.img_depth))
+        class_in = Input(shape=(self.n_classes,))
         
-        x = Conv2D(filters=ch,
-                   kernel_size=3,
-                   padding='same',
-                   kernel_initializer=self.kernel_init)(img_in)
+        ch = 16
+        x = Conv2D(
+            filters=ch,
+            kernel_size=1,
+            kernel_initializer='he_uniform'
+            )(model_in)
         x = LeakyReLU(0.2)(x)
 
-        ch *= 2
-        x = style_discriminator_block(x, ch, kernel_init=self.kernel_init) #128x32
-        ch *= 2
-        x = style_discriminator_block(x, ch, kernel_init=self.kernel_init) #64x64
-        ch *= 2
-        x = style_discriminator_block(x, ch, kernel_init=self.kernel_init) #32x128
-        ch *= 2
-        x = style_discriminator_block(x, ch, kernel_init=self.kernel_init) #16x128
-        x = style_discriminator_block(x, ch, kernel_init=self.kernel_init) #8x128
-        x = style_discriminator_block(x, ch, kernel_init=self.kernel_init) #4x128
+        while ch < self.latent_dim:
+            x = style2_discriminator_block(x, ch)
+            ch = ch*2
+
+        while K.int_shape(x)[1] > 4:
+            x = style2_discriminator_block(x, ch)
+
+        # 4x4
+        x = Conv2D(
+            filters=ch,
+            kernel_size=3,
+            padding='same',
+            kernel_initializer='he_uniform'
+            )(x)
+        x = LeakyReLU(0.2)(x)
+        x = Conv2D(
+            filters=ch,
+            kernel_size=4,
+            padding='valid',
+            kernel_initializer='he_uniform'
+            )(x)
+        x = LeakyReLU(0.2)(x)
+
+        # architecture of tail stem
         x = Flatten()(x)
+        embed_labels = Dense(
+            K.int_shape(class_in)[-1],
+            kernel_initializer='he_uniform'
+            )(class_in)
+        x = Concatenate()([x, embed_labels])
 
         # note that latent dim must be divisible by batch size
-        z_mean = Dense(self.latent_dim, name='z_mean')(x)
-        z_log_var = Dense(self.latent_dim, name='z_log_var')(x)
+        z_mean = Dense(self.latent_dim, name='z_mean', kernel_initializer='he_uniform')(x)
+        z_log_var = Dense(self.latent_dim, name='z_log_var', kernel_initializer='he_uniform')(x)
         z = ReparameterizationTrick()([z_mean, z_log_var])
-        self.encoder = Model(
-            img_in,
-            [z, z_mean, z_log_var]
-            )
+        self.encoder = Model([model_in, class_in], [z, z_mean, z_log_var])
         print(self.encoder.summary())
 
     def build_decoder(self):
-        style_in = Input(shape=(self.latent_dim, ))
-        label_in = Input(shape=(self.n_classes, ))
-        style = Concatenate(axis=-1)([style_in, label_in])
+        model_in = Input(shape=(self.latent_dim, ))
+        class_in = Input(shape=(self.n_classes, ))
+        class_embed = Dense(self.latent_dim, kernel_initializer='he_uniform')(class_in)
+        style = Concatenate()([model_in, class_in])
+        style = Lambda(
+            lambda x: x * tf.math.rsqrt(tf.reduce_mean(tf.square(x), axis=-1, keepdims=True) + K.epsilon())
+            )(style)
         for _ in range(4):
-            style = Dense(self.latent_dim, kernel_initializer=VarianceScaling(1))(style)
+            style = Dense(units=self.latent_dim, kernel_initializer='he_uniform')(style)
             style = LeakyReLU(0.2)(style)
 
-        x = LearnedConstantLatent()(style_in)
+        ch = self.latent_dim
+        x = LearnedConstantLatent()(model_in)
+        x = style2_generator_layer(x, style, output_dim=ch) #4x256
+        to_rgb_4x4 = to_rgb(x, style)
+        to_rgb_4x4 = UpSampling2D(2, interpolation='bilinear')(to_rgb_4x4)
 
-        x = style_generator_block(x, style, ch, kernel_init=self.kernel_init, upsample=False) #4x128
-        x = style_generator_block(x, style, ch, kernel_init=self.kernel_init) #8x128
-        x = style_generator_block(x, style, ch, kernel_init=self.kernel_init) #16x128
-        ch = ch // 2
-        x = style_generator_block(x, style, ch, kernel_init=self.kernel_init) #32x128
-        ch = ch // 2
-        x = style_generator_block(x, style, ch, kernel_init=self.kernel_init) #64x64
-        ch = ch // 2
-        x = style_generator_block(x, style, ch,  kernel_init=self.kernel_init) #128x32
-        ch = ch // 2
-        x = style_generator_block(x, style, ch,  kernel_init=self.kernel_init) #256x16
+        x = style2_generator_layer(x, style, output_dim=ch, upsample=True) #8x256
+        x = style2_generator_layer(x, style, output_dim=ch)
+        to_rgb_8x8 = to_rgb(x, style)
+        to_rgb_8x8 = Add()([to_rgb_8x8, to_rgb_4x4])
+        to_rgb_8x8 = UpSampling2D(2, interpolation='bilinear')(to_rgb_8x8)
 
-        x = Conv2D(
-            filters=3,
-            kernel_size=3,
-            padding='same',
-            kernel_initializer=VarianceScaling(1)
-            )(x)
-        model_out = Activation('tanh')(x)
-        self.decoder = Model([style_in, label_in], model_out)
-        print(self.decoder.summary())
+        x = style2_generator_layer(x, style, output_dim=ch, upsample=True) #16x256
+        x = style2_generator_layer(x, style, output_dim=ch)
+        to_rgb_16x16 = to_rgb(x, style)
+        to_rgb_16x16 = Add()([to_rgb_16x16, to_rgb_8x8])
+        to_rgb_16x16 = UpSampling2D(2, interpolation='bilinear')(to_rgb_16x16)
+
+        ch = ch//2
+        x = style2_generator_layer(x, style, output_dim=ch, upsample=True) #32x128
+        x = style2_generator_layer(x, style, output_dim=ch)
+        to_rgb_32x32 = to_rgb(x, style)
+        to_rgb_32x32 = Add()([to_rgb_32x32, to_rgb_16x16])
+        to_rgb_32x32 = UpSampling2D(2, interpolation='bilinear')(to_rgb_32x32)
+
+        ch = ch//2
+        x = style2_generator_layer(x, style, output_dim=ch, upsample=True) #64x64
+        x = style2_generator_layer(x, style, output_dim=ch)
+        to_rgb_64x64 = to_rgb(x, style)
+        to_rgb_64x64 = Add()([to_rgb_64x64, to_rgb_32x32])
+        to_rgb_64x64 = UpSampling2D(2, interpolation='bilinear')(to_rgb_64x64)
+
+        ch = ch//2
+        x = style2_generator_layer(x, style, output_dim=ch, upsample=True) #128x32
+        x = style2_generator_layer(x, style, output_dim=ch)
+        to_rgb_128x128 = to_rgb(x, style)
+        to_rgb_128x128 = Add()([to_rgb_128x128, to_rgb_64x64])
+        to_rgb_128x128 = UpSampling2D(2, interpolation='bilinear')(to_rgb_128x128)
+
+        ch = ch//2
+        x = style2_generator_layer(x, style, output_dim=ch, upsample=True) #256x16
+        x = style2_generator_layer(x, style, output_dim=ch)
+        to_rgb_256x256 = to_rgb(x, style)
+        to_rgb_256x256 = Add()([to_rgb_256x256, to_rgb_128x128])
+        model_out = Activation('tanh')(to_rgb_256x256)
+
+        self.generator = Model([model_in, class_in], model_out)   
+        print(self.generator.summary()) 
 
     def build_model(self):
-        ## Encoder
         img_in = Input((self.img_dim_y, self.img_dim_x, self.img_depth))
         class_label = Input((self.n_classes, ))
         z, z_mean, z_log_var = self.encoder(img_in)
@@ -189,7 +236,7 @@ class StyleVAE():
                 self.reconstruction_validation(reconstructed_imgs, epoch)
                 # test img generation
                 fake_labels = label_generator(self.batch_size)
-                fake_latents = np.random.normal(0, 1, (self.batch_size, self.latent_dim))
+                fake_latents = np.random.normal(0, 0.5, (self.batch_size, self.latent_dim))
                 fake_imgs, _ = self.vae.predict([fake_latents, fake_labels])
                 self.reconstruction_validation(fake_imgs, epoch+0.1)
                 self.save_model_weights(epoch, np.mean(recon_accum))

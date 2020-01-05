@@ -3,7 +3,7 @@ import keras.backend as K
 #from model.stylegan import StyleGAN
 #from model.minigan import MiniGAN
 #from model.msgstylegan import MSGStyleGAN
-from model.stylegan2 import StyleGAN2
+from model.stylegan2_pl import StyleGAN2
 import psutil
 
 N_CPU = psutil.cpu_count()
@@ -21,7 +21,7 @@ def parse_args():
     parser.add_argument(
         '--training_dir',
         type=str,
-        default='agglomerated_images'
+        default='mtg_images'
         )
     parser.add_argument(
         '--validation_dir',
@@ -46,12 +46,17 @@ def parse_args():
     parser.add_argument(
         '--g_weights',
         type=str,
-        default='logging/model_saves/minigan_generator_weights_30_0.069.h5'
+        default='logging/model_saves/stylegan2_generator_weights_30_1.576.h5'
         )
     parser.add_argument(
         '--d_weights',
         type=str,
-        default='logging/model_saves/minigan_discriminator_weights_30_0.901.h5'
+        default='logging/model_saves/stylegan2_discriminator_weights_30_1.150.h5'
+        )
+    parser.add_argument(
+        '--m_weights',
+        type=str,
+        default='logging/model_saves/stylegan2_discriminator_weights_2_0.981.h5'
         )
     parser.add_argument(
         '--epochs',
@@ -137,7 +142,9 @@ def main():
         if args.load_checkpoint:
             gan.discriminator.load_weights(args.d_weights, by_name=True)
             gan.generator.load_weights(args.g_weights, by_name=True)
+            gan.mapper.load_weights(args.m_weights, by_name=True)
             print('Success - Model Checkpoint Loaded...')
+        gan.build_model()
         gan.train(args.epochs)
 
     else:
