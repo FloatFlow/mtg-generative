@@ -5,51 +5,6 @@ from keras.layers import BatchNormalization, Dense, Reshape, Lambda, Multiply, A
 from keras.initializers import RandomNormal, VarianceScaling
 from model.layers import *
 
-###############################################################################
-## SinGAN
-###############################################################################
-
-def singan_generator_block(inputs, noise, filters=32):
-    x = Add()([inputs, noise])
-    for _ in range(5):
-        x = Conv2D(
-            filters=filters,
-            kernel_size=3,
-            padding='same',
-            kernel_initializer='he_uniform'
-            )(x)
-        x = BatchNormalization()(x)
-        x = LeakyReLU(0.2)(x)
-    x = Conv2D(
-        filters=3,
-        kernel_size=1,
-        padding='same',
-        kernel_initializer='he_uniform'
-        )(x)
-    x = Add()([inputs, x])
-    x = Activation('tanh')(x)
-    return x
-
-def singan_discriminator_block(inputs, filters=32):
-    x = inputs
-    for _ in range(5):
-        x = Conv2D(
-            filters=filters,
-            kernel_size=3,
-            padding='same',
-            kernel_initializer='he_uniform'
-            )(x)
-        x = BatchNormalization()(x)
-        x = LeakyReLU(0.2)(x)
-    x = Conv2D(
-        filters=1,
-        kernel_size=1,
-        padding='same',
-        kernel_initializer='he_uniform'
-        )(x)
-    x = Flatten()(x)
-    x = Dense(1, kernel_initializer='he_uniform')(x)
-    return x
 
 ###############################################################################
 ## StyleGAN
@@ -393,5 +348,11 @@ def gated_masked_conv2d(v_stack_in, h_stack_in, out_dim, kernel, mask='b', resid
         strides=(1, 1)
         )(h_stack_out)
     if residual:
+        if K.int_shape(h_stack_in)[-1] != out_dim:
+            h_stack_in = Conv2D(
+                filters=out_dim,
+                kernel_size=1,
+                padding='same'
+                )(h_stack_in)
         h_stack_out = Add()([h_stack_in, h_stack_out])
     return v_stack_out, h_stack_out

@@ -194,6 +194,129 @@ class ModulatedConv2D(Layer):
             # scale output activations
             x = x * K.reshape(mod_d, (-1, 1, 1, K.int_shape(mod_d)[-1])) #(BhwO)
         return x
+
+    def compute_output_shape(self, input_shape):
+        img_shape, style_shape = input_shape
+        if self.downsample:
+            img_shape = (img_shape[0], img_shape[1]//2, img_shape[2]//2, self.filters)
+        elif self.upsample:
+            img_shape = (img_shape[0], img_shape[1]*2, img_shape[2]*2, self.filters)
+        else:
+            img_shape = (img_shape[0], img_shape[1], img_shape[2], self.filters)
+        return img_shape
+
+class ModulatedSNConv2D(Layer):
+    def __init__(
+        self,
+        kernel_size=3,
+        filters=256,
+        padding='same',
+        upsample=False,
+        downsample=False,
+        kernel_initializer='he_uniform',
+        demodulate=True,
+        **kwargs
+        ):
+        if isinstance(kernel_size, int):
+            self.kernel_size = (kernel_size, kernel_size)
+        elif isinstance(kernel_size, tuple):
+            self.kernel_size = kernel_size
+        else:
+            raise ValueError('Invalid kernel size dtype for ModulatedConv2D')
+        self.filters = filters
+        self.padding = padding
+        self.upsample = upsample
+        self.downsample = downsample
+        self.kernel_initializer = kernel_initializer
+        self.demodulate = demodulate
+        super(ModulatedSNConv2D, self).__init__(**kwargs)
+
+    def build(self, input_shape):
+        img_shape, style_shape = input_shape
+        input_dim = img_shape[-1]
+        kernel_shape = self.kernel_size + (input_dim, self.filters)
+
+        self.kernel = self.add_weight(
+            shape=kernel_shape,
+            initializer=self.kernel_initializer,
+            name='kernel',
+            )
+
+        self.u = self.add_weight(
+            shape=tuple([1, self.kernel.shape.as_list()[-1]]),
+            initializer=initializers.RandomNormal(0, 1),
+            name='sn',
+            trainable=False
+            )
+        #super(ModulatedConv2D, self).build(input_shape)
+    
+    def call(self, inputs, training=None):
+        input_vals, style = inputs
+        ### spectral normalization ###
+        def _l2normalize(v, eps=1e-12):
+            return v / (K.sum(v ** 2) ** 0.5 + eps)
+        def power_iteration(W, u):
+            #Accroding the paper, we only need to do power iteration one time.
+            _u = u
+            _v = _l2normalize(K.dot(_u, K.transpose(W)))
+            _u = _l2normalize(K.dot(_v, W))
+            return _u, _v
+        #Spectral Normalization
+        W_shape = self.kernel.shape.as_list()
+        #Flatten the Tensor
+        W_reshaped = K.reshape(self.kernel, [-1, W_shape[-1]])
+        _u, _v = power_iteration(W_reshaped, self.u)
+        #Calculate Sigma
+        sigma=K.dot(_v, W_reshaped)
+        sigma=K.dot(sigma, K.transpose(_u))
+        #normalize it
+        W_bar = W_reshaped / sigma
+        #reshape weight tensor
+        if training in {0, False}:
+            W_bar = K.reshape(W_bar, W_shape)
+        else:
+            with tf.control_dependencies([self.u.assign(_u)]):
+                W_bar = K.reshape(W_bar, W_shape)
+
+        ### modulation/demodulation ###
+        # add minibatch dim
+        mod_w = K.expand_dims(W_bar, axis=0) #(BkkIO)
+
+        # modulate
+        mod_w = mod_w * K.reshape(style, (-1, 1, 1, K.int_shape(style)[-1], 1)) #(BkkIO)
+
+        if self.demodulate:
+            # demodulate
+            mod_d = tf.math.rsqrt(tf.reduce_sum(tf.square(mod_w), axis=[1,2,3]) + K.epsilon())
+
+        # scale input activations
+        x = input_vals * K.reshape(style, (-1, 1, 1, K.int_shape(style)[-1])) #(BhwI)
+
+        if self.upsample:
+            x = UpSampling2D(2, interpolation='bilinear')(x)
+            x = K.conv2d(
+                x,
+                W_bar,
+                padding=self.padding
+                )
+        elif self.downsample:
+            x = K.conv2d(
+                x,
+                W_bar,
+                strides=(2, 2),
+                padding=self.padding
+                )
+        else:
+            x = K.conv2d(
+                x,
+                W_bar,
+                padding=self.padding
+                )
+        if self.demodulate:
+            # scale output activations
+            x = x * K.reshape(mod_d, (-1, 1, 1, K.int_shape(mod_d)[-1])) #(BhwO)
+        return x
+
     def compute_output_shape(self, input_shape):
         img_shape, style_shape = input_shape
         if self.downsample:

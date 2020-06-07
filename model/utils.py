@@ -158,7 +158,7 @@ def card_batch_collector(dir, batch_size, seed, file_type='.jpg'):
 
 def img_resize(img, y_dim, x_dim):
     img = Image.fromarray(img)
-    img = img.resize((512, 512), Image.LANCZOS)
+    img = img.resize((y_dim, x_dim), Image.LANCZOS)
     return np.array(img)
 
 def batch_resize(batch, dim):
@@ -286,9 +286,10 @@ def onehot_label_decoder(one_hot_label):
             str_label.append('R')
     return str(str_label)
 
-def downsample_batch(img_batch, img_hw):
+def downsample_batch(img_batch, scale):
+    original_size = img_batch.shape[1]
     return np.stack(
-        [np.array(Image.fromarray(img).resize((img_hw, img_hw), Image.LANCZOS)) for img in img_batch]
+        [np.array(Image.fromarray(img).resize((original_size//scale, original_size//scale), Image.LANCZOS)) for img in img_batch]
         )
 
 ####################################################

@@ -169,10 +169,10 @@ class SinGAN():
                 for img in d_batch:
                     print(img.shape)
                 d_loss = self.discriminator_model.train_on_batch(d_batch, d_dummy)
-
+                print("trained d on batch")
                 g_true = g_dummy + real_batch
                 g_loss = self.generator_model.train_on_batch(noise, g_true)
-                
+                print("trained g on batch")
                 d_accum.append(d_loss[0])
                 g_accum.append(np.mean(g_loss[1:len(self.resolutions)]))
                 recon_accum.append(np.mean(g_loss[len(self.resolutions):]))

@@ -364,6 +364,12 @@ class VQVAE():
             n_cpu=self.n_cpu,
             img_dim=self.img_dim_x
             )
+        img_generator = ImgGenerator(
+            img_dir=self.training_dir,
+            batch_size=self.batch_size,
+            n_cpu=self.n_cpu,
+            img_dim=self.img_dim_x
+            )
         
         #self.generate_samples(-1)
 
@@ -375,7 +381,10 @@ class VQVAE():
             self.generate_from_random(-1)
             pbar = tqdm(total=n_batches)
             for batch_i in range(n_batches):
-                real_batch, real_labels = card_generator.next()
+                if batch_i % 2 == 0:
+                    real_batch, real_labels = card_generator.next()
+                else:
+                    real_batch, real_labels = img_generator.next()
                 codebook_indices = self.encoder.predict(real_batch)
                 one_hot = to_categorical(codebook_indices)
                 loss, acc = self.pixelcnn.train_on_batch(
