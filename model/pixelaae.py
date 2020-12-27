@@ -148,9 +148,7 @@ class PixelAAE():
             style = LeakyReLU(0.2)(style)
 
         ch = self.latent_dim//2
-        #x = LearnedConstantLatent()(style_in)
-        x = Dense(4*4*ch)(style)
-        x = Reshape((4, 4, -1))(x)
+        x = LearnedConstantLatent()(style_in)
         v_stack, h_stack = gated_masked_conv2d(
             v_stack_in=x,
             h_stack_in=x,
@@ -174,8 +172,8 @@ class PixelAAE():
                     context=style,
                     use_context=True
                     )
-            v_stack = UpSampling2D(2)(v_stack)
-            h_stack = UpSampling2D(2)(h_stack)
+            v_stack = UpSampling2D(2, interpolation='bilinear')(v_stack)
+            h_stack = UpSampling2D(2, interpolation='bilinear')(h_stack)
 
         for _ in range(2):
             ch = ch//2
@@ -190,10 +188,10 @@ class PixelAAE():
                     context=style,
                     use_context=True
                     )
-            v_stack = UpSampling2D(2)(v_stack)
-            h_stack = UpSampling2D(2)(h_stack)
+            v_stack = UpSampling2D(2, interpolation='bilinear')(v_stack)
+            h_stack = UpSampling2D(2, interpolation='bilinear')(h_stack)
 
-        for _ in range(2):
+        for _ in range(5):
             v_stack, h_stack = gated_masked_conv2d(
                 v_stack_in=v_stack,
                 h_stack_in=h_stack,
