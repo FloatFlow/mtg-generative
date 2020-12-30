@@ -241,13 +241,15 @@ def card_crop(img_path, img_dim=256):
     # normalize
     return img
 
-def generate_labels(n_samples, n_classes=5, repeats=2):
+def generate_labels(n_samples, n_classes=5, repeats=1):
     fake_labels = []
-    for _ in repeats:
+    for i in range(repeats*n_classes):
         labels = np.eye(n_classes)[np.random.choice(n_classes, n_samples)]
+        if (repeats > 1) and (i+1 % n_classes == 0):
+            labels = np.sum([labels, fake_labels[-1]], axis=0)
         fake_labels.append(labels)
-    fake_labels = np.sum(fake_labels, axis=0)
-    return fake_labels
+    fake_labels = np.concatenate(fake_labels, axis=0)
+    return fake_labels[:n_samples, :]
 
 def label_generator(n_samples, n_shared_classes=1, single_class_weight=4):
     class_labels = np.tile(np.identity(5), (single_class_weight*5, 1))

@@ -1,5 +1,7 @@
-pip install keras opencv-python tqdm pandas pillow psutil tensorflow-probability
+pip install --upgrade pip setuptools wheel
+pip install keras==2.3.1 opencv-python tqdm pandas pillow psutil nevergrad
 apt-get install libsm6 libxrender1 libfontconfig1 unzip
 apt update && apt install -y libsm6 libxext6
+apt install libgl1-mesa-glx
 #apt install php php-common gcc
 #apt install imagemagick

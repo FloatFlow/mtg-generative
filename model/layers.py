@@ -334,7 +334,7 @@ class Bias(Layer):
     def build(self, input_shape):
         self.bias = self.add_weight(
             name='bias',
-            shape=(input_shape[-1]),
+            shape=(input_shape[-1], ),
             initializer='zeros',
             trainable=True
             )

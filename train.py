@@ -1,10 +1,7 @@
 import argparse
 import keras.backend as K
-#from model.stylegan import StyleGAN
-#from model.minigan import MiniGAN
-#from model.msgstylegan import MSGStyleGAN
-#from model.styleaae import StyleAAE
-from model.pixelaae import PixelAAE
+from model.stylegan2 import StyleGAN2
+from model.evolstylegan import EvolStyleGAN
 import psutil
 
 N_CPU = psutil.cpu_count()
@@ -42,7 +39,7 @@ def parse_args():
     parser.add_argument(
         '--load_checkpoint',
         type=bool,
-        default=False
+        default=True
         )
 
     # train parameters
@@ -76,35 +73,29 @@ def parse_args():
 
 def main():
     args = parse_args()
-    gan = PixelAAE(
+    gan = EvolStyleGAN(
         lr=args.lr,
         training_dir=args.training_dir,
         validation_dir=args.validation_dir,
         checkpoint_dir=args.checkpoint_dir,
         testing_dir=args.testing_dir,
+        img_depth=3,
+        img_height=256,
+        img_width=256,
         )
 
     if args.train:
         if args.load_checkpoint:
-            epoch = 25
-            loss = 0.119
-            gan.encoder.load_weights(
-                'logging/model_saves/styleaae_encoder_weights_{}_{}.h5'.format(epoch, loss),
+            gan.generator.load_weights(
+                'logging/model_saves/stylegan2/stylegan2_generator_weights_195_2.481.h5',
                 by_name=True
                 )
-            gan.decoder.load_weights(
-                'logging/model_saves/styleaae_encoder_weights_{}_{}.h5'.format(epoch, loss),
-                by_name=True
-                )
-            gan.style_discriminator.load_weights(
-                'logging/model_saves/styleaae_sd_weights_{}_{}.h5'.format(epoch, loss),
-                by_name=True
-                )
-            gan.color_discriminator.load_weights(
-                'logging/model_saves/styleaae_cd_weights_{}_{}.h5'.format(epoch, loss),
-                by_name=True
-                )
-            print('Success - Model Checkpoint Loaded...')
+            #gan.discriminator.load_weights(
+            #    'logging/model_saves/styleaae_encoder_weights_{}_{}.h5'.format(epoch, loss),
+            #    by_name=True
+            #    )
+            gan.load_quality_estimator('logging/model_saves/koncept/bsz64_i1[224,224,3]_lMSE_o1[1]_best_weights.h5')
+            print('Success - Model Checkpoints Loaded...')
         gan.train(
             epochs=args.epochs,
             n_cpu=args.n_cpu,

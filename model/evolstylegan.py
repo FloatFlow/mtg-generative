@@ -8,26 +8,29 @@ from PIL import Image
 from keras.utils import plot_model
 from functools import partial
 
-from keras.layers import BatchNormalization, Dense, Reshape, Lambda, Multiply, Add, Layer
+from keras.layers import BatchNormalization, Dense, Reshape, Lambda, Multiply, Add, Layer, Dropout
 from keras.layers import Activation, UpSampling2D, AveragePooling2D, GlobalAveragePooling2D, Input
 from keras.layers import Concatenate, Embedding, Flatten, LeakyReLU
-from keras.models import Model
+from keras.models import Model, load_model
 from keras.optimizers import Adam
 import keras.backend as K
 from keras.engine.network import Network
+from keras.applications.inception_resnet_v2 import InceptionResNetV2
+
+#import kuti
+#from kuti import applications as apps
+import nevergrad as ng
 
 from model.utils import *
 from model.layers import *
 from model.network_blocks import *
 
-class StyleGAN2():
+class EvolStyleGAN():
     def __init__(
         self, 
         img_width,
         img_height,
         img_depth,
-        z_len,
-        n_classes,
         lr,
         training_dir,
         validation_dir,
@@ -38,7 +41,6 @@ class StyleGAN2():
         self.img_width = img_width
         self.img_height = img_height
         self.img_depth = img_depth
-        self.z_len = z_len
         self.n_noise_samples = n_noise_samples
         self.lr = lr
         self.training_dir = training_dir
@@ -50,14 +52,12 @@ class StyleGAN2():
                      self.testing_dir]:
             if not os.path.isdir(path):
                 os.makedirs(path)
-        self.n_classes = n_classes
-        self.name = 'stylegan2'
+        self.z_len = 256
+        self.n_classes = 5
+        self.name = 'evolstylegan'
         self.noise_samples = np.random.normal(0,0.8,size=(self.n_noise_samples, self.z_len))
         self.label_samples = label_generator(self.n_noise_samples)
         self.build_generator()
-        self.build_discriminator()
-        self.build_model()
-
 
     ###############################
     ## All our architecture
@@ -121,164 +121,84 @@ class StyleGAN2():
         model_out = Activation('tanh')(to_rgb_256x256)
 
         self.generator = Model([model_in, class_in], model_out)   
-        print(self.generator.summary())   
+        print(self.generator.summary())
 
-
-    def build_discriminator(self):
-        model_in = Input(shape=(self.img_width, self.img_height, self.img_depth))
-        class_in = Input(shape=(self.n_classes,))
-        
-        ch = 16
-        x = Conv2D(
-            filters=ch,
-            kernel_size=1,
-            kernel_initializer='he_uniform'
-            )(model_in)
-        x = LeakyReLU(0.2)(x)
-
-        while ch < self.z_len:
-            x = style2_discriminator_block(x, ch)
-            ch = ch*2
-
-        while K.int_shape(x)[1] > 4:
-            x = style2_discriminator_block(x, ch)
-
-        # 4x4
-        x = MiniBatchStd()(x)
-        x = Conv2D(
-            filters=ch,
-            kernel_size=3,
-            padding='same',
-            kernel_initializer='he_uniform'
-            )(x)
-        x = LeakyReLU(0.2)(x)
-        x = Conv2D(
-            filters=ch,
-            kernel_size=4,
-            padding='valid',
-            kernel_initializer='he_uniform'
-            )(x)
-        x = LeakyReLU(0.2)(x)
-
-        # architecture of tail stem
-        out = Dense(units=1, kernel_initializer='he_uniform')(x)
-        embed_labels = Dense(
-            K.int_shape(class_in)[-1],
-            kernel_initializer='he_uniform'
-            )(class_in)
-        yh = Multiply()([out, embed_labels])
-        model_out = Lambda(lambda x: K.sum(x, axis=-1))(yh)
-
-        self.discriminator = Model([model_in, class_in], model_out)
-        self.frozen_discriminator = Network([model_in, class_in], model_out)
-
-        print(self.discriminator.summary())
-
-    def build_model(self):
-        d_optimizer = Adam(lr=self.lr, beta_1=0.0, beta_2=0.99)
-        g_optimizer = Adam(lr=self.lr, beta_1=0.0, beta_2=0.99)
-
-        # build complete discriminator
-        fake_in = Input(shape=(self.img_width, self.img_height, self.img_depth))
-        real_in = Input(shape=(self.img_width, self.img_height, self.img_depth))
-        class_in = Input(shape=(self.n_classes, ))
-        fake_label = self.discriminator([fake_in, class_in])
-        real_label = self.discriminator([real_in, class_in])
-
-        self.discriminator_model = Model(
-            [real_in, fake_in, class_in],
-            [real_label, fake_label, real_label])
-        self.discriminator_model.compile(
-            d_optimizer,
-            loss=[
-                nonsat_real_discriminator_loss,
-                nonsat_fake_discriminator_loss,
-                partial(gradient_penalty_loss, averaged_samples=real_in)
-                ]
+    def load_quality_estimator(self, estimator_path):
+        #base_model, preprocess_fn = apps.get_model_imagenet(apps.InceptionResNetV2)
+        #head = apps.fc_layers(base_model.output, name='fc', 
+        #                      fc_sizes      = [2048, 1024, 256, 1], 
+        #                      dropout_rates = [0.25, 0.25, 0.5, 0], 
+        #                      batch_norm    = 2)
+        base_model = InceptionResNetV2(
+            weights='imagenet',
+            include_top=False,
+            input_shape=(224, 224, 3)
             )
+        x = GlobalAveragePooling2D()(base_model.output)
+        x = Dense(2048, activation='relu')(x)
+        x = BatchNormalization()(x)
+        x = Dropout(0.25)(x)
 
-        self.frozen_discriminator.trainable = False
+        x = Dense(1024, activation='relu')(x)
+        x = BatchNormalization()(x)
+        x = Dropout(0.25)(x)
 
-        # build generator model
-        z_in = Input(shape=(self.z_len, ))
-        class_in = Input(shape=(self.n_classes, ))
-        fake_img = self.generator([z_in, class_in])
-        frozen_fake_label = self.frozen_discriminator([fake_img, class_in])
+        x = Dense(256, activation='relu')(x)
+        x = BatchNormalization()(x)
+        x = Dropout(0.5)(x)
 
-        self.generator_model = Model([z_in, class_in], frozen_fake_label)
-        self.generator_model.compile(g_optimizer, nonsat_generator_loss)
-        
-        print(self.discriminator_model.summary())
-        print(self.generator_model.summary())
+        qual = Dense(1, activation='linear')(x)
+
+        self.quality_estimator = Model(inputs=base_model.input, outputs=qual)
+        self.quality_estimator.load_weights(estimator_path)
+        print(self.quality_estimator.summary())
+
+    def optimizer_step(self, z, c):
+        g_z = self.generator.predict([z, c])
+        g_z = np.stack([cv2.resize(img, dsize=(224, 224), interpolation=cv2.INTER_CUBIC) for img in g_z])
+        q_z = self.quality_estimator.predict(g_z)
+        return -np.squeeze(q_z)
 
     ###############################
     ## All our training, etc
     ###############################               
 
-    def train(self, epochs):
-        card_generator = CardGenerator(
-            img_dir=self.training_dir,
-            batch_size=self.batch_size,
-            n_cpu=self.n_cpu,
-            img_dim=self.img_width
+    def train(self, epochs, batch_size=4, n_cpu=4, save_freq=5):
+        n_samples = 100
+        budget = 40
+        np.random.seed(42)
+        z_0 = np.random.normal(0, 0.5, (n_samples, self.z_len))
+        classes = generate_labels(n_samples=n_samples, n_classes=self.n_classes, repeats=2)
+        pz_0 = ng.p.Array(init=z_0)
+        pz_0.set_bounds(lower=-5, upper=5, method='bouncing')
+        pz_0.set_mutation(sigma=1e-6, custom='discrete')
+        #print(help(ng.optimizers.OnePlusOne))
+        optimizer = ng.optimizers.OnePlusOne(
+            parametrization=pz_0,
+            budget=budget,
+            num_workers=1
             )
-        img_generator = ImgGenerator(
-            img_dir='agglomerated_images',
-            batch_size=self.batch_size,
-            n_cpu=self.n_cpu,
-            img_dim=self.img_width
+        #optimizer = ng.optimization.optimizerlib.ParametrizedOnePlusOne(
+        #    parametrization=pz_0,
+        #    budget=budget,
+        #    noise_handling=('random', 1e-6),
+        #    mutation='discrete',
+        #    num_workers=n_cpu
+        #    )
+        recommendations = optimizer.minimize(
+            partial(self.optimizer_step, c=classes),
+            verbosity=1
             )
-        n_batches = card_generator.n_batches*2
-        for epoch in range(epochs):
-            d_loss_accum = []
-            g_loss_accum = []
+        print(recommendations.value.shape)
 
-            pbar = tqdm(total=n_batches)
-            for batch_i in range(n_batches):
-                if batch_i % 2 == 0:
-                    real_batch, real_labels = card_generator.next()
-                else:
-                    real_batch, real_labels = img_generator.next()
+        self.noise_validation(epoch=0, z=z_0[:16, ...], c=classes[:16, ...])
+        self.noise_validation(epoch=1, z=recommendations.value[:16, ...], c=classes[:16, ...])
 
-                noise = np.random.normal(0, 1, size=(self.batch_size, self.z_len))
-                dummy = np.ones(shape=(self.batch_size,))
-
-                fake_batch = self.generator.predict([noise, real_labels])
-                
-                d_loss = self.discriminator_model.train_on_batch(
-                    [real_batch, fake_batch, real_labels],
-                    [dummy, dummy, dummy]
-                    )
-                d_loss_accum.append(d_loss[0])
-            
-                g_loss = self.generator_model.train_on_batch([noise, real_labels], dummy)
-                g_loss_accum.append(g_loss)
-                
-
-                pbar.update()
-            pbar.close()
-
-            print('{}/{} ----> d_loss: {}, g_loss: {}'.format(
-                epoch, 
-                epochs, 
-                np.mean(d_loss_accum), 
-                np.mean(g_loss_accum)
-                ))
-
-            if epoch % self.save_freq == 0:
-                self.noise_validation(epoch)
-                self.save_model_weights(epoch, np.mean(d_loss_accum), np.mean(g_loss_accum))
-
-            card_generator.shuffle()
-
-        card_generator.end()                
-
-
-    def noise_validation(self, epoch):
+    def noise_validation(self, epoch, z, c):
         print('Generating Images...')
         if not os.path.isdir(self.validation_dir):
             os.mkdir(self.validation_dir)
-        predicted_imgs = self.generator.predict([self.noise_samples, self.label_samples])
+        predicted_imgs = self.generator.predict([z, c])
         predicted_imgs = [((img+1)*127.5).astype(np.uint8) for img in predicted_imgs]
 
         # fill a grid
