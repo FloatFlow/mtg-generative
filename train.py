@@ -83,19 +83,19 @@ def main():
         img_height=256,
         img_width=256,
         )
+    if args.load_checkpoint:
+        gan.generator.load_weights(
+            'logging/mtg_model_saves/stylegan2_generator_weights_430_2.277.h5',
+            by_name=True
+            )
+        gan.discriminator.load_weights(
+            'logging/mtg_model_saves/stylegan2_discriminator_weights_430_0.762.h5'
+            by_name=True
+            )
+        #gan.load_quality_estimator('logging/model_saves/koncept/bsz64_i1[224,224,3]_lMSE_o1[1]_best_weights.h5')
+        print('Success - Model Checkpoints Loaded...')
 
     if args.train:
-        if args.load_checkpoint:
-            gan.generator.load_weights(
-                'logging/model_saves/stylegan2/stylegan2_generator_weights_195_2.481.h5',
-                by_name=True
-                )
-            #gan.discriminator.load_weights(
-            #    'logging/model_saves/styleaae_encoder_weights_{}_{}.h5'.format(epoch, loss),
-            #    by_name=True
-            #    )
-            gan.load_quality_estimator('logging/model_saves/koncept/bsz64_i1[224,224,3]_lMSE_o1[1]_best_weights.h5')
-            print('Success - Model Checkpoints Loaded...')
         gan.train(
             epochs=args.epochs,
             n_cpu=args.n_cpu,
@@ -104,9 +104,11 @@ def main():
             )
 
     else:
-        gan.predict_noise_testing(
-            args.class_testing_labels,
-            args.testing_dir
+        gan.generate_samples(
+            savedir='logging/testing_images',
+            n_samples=8196,
+            batch_size=args.batch_size,
+            z_var=0.75
             )
 
 if __name__ == '__main__':

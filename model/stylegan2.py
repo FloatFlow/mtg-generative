@@ -7,6 +7,7 @@ import cv2
 from PIL import Image
 from keras.utils import plot_model
 from functools import partial
+from scipy import ndimage
 
 from keras.layers import BatchNormalization, Dense, Reshape, Lambda, Multiply, Add, Layer
 from keras.layers import Activation, UpSampling2D, AveragePooling2D, GlobalAveragePooling2D, Input
@@ -211,45 +212,155 @@ class StyleGAN2():
         print(self.discriminator_model.summary())
         print(self.generator_model.summary())
 
+    def augmentation_pipeline(self, image, p=0.0):
+        image = ((image+1.0)*127.5).astype(np.uint8)
+
+        # pixel blitting augmentations
+        # x-flip
+        if np.random.uniform(low=0.0, high=1.0) < p:
+            image = image[:, ::-1, :]
+        # 90 degree rotation
+        if np.random.uniform(low=0.0, high=1.0) < p:
+            direction = random.sample([0, 1, 2, 3], k=1)
+            image = np.rot90(image, k=direction[0])
+        # we omit translation augmentation because our pipeline does that already
+
+        # general geometric transformations
+        # isotropic scaling, aka zoom
+        isotropic_scaling = False
+        if np.random.uniform(low=0.0, high=1.0) < p:
+            magnitude = np.clip(np.random.lognormal(0, (0.2*np.log(2))**2), a_min=0.05, a_max=1.0)
+            x_y_length = int(image.shape[0]*magnitude)
+            if x_y_length < image.shape[0]:
+                y_offset = np.random.randint(low=0, high=img.shape[0]-x_y_length) if (img.shape[0]-x_y_length > 0) else 0
+                x_offset = np.random.randint(low=0, high=img.shape[1]-x_y_length) if (img.shape[1]-x_y_length > 0) else 0
+                cropped_img = image[y_offset:y_offset+x_y_length, x_offset:x_offset+x_y_length, :]
+                cropped_img = Image.fromarray(cropped_img)
+                #print(x_y_length, y_offset, x_offset)
+                cropped_img = cropped_img.resize((image.shape[1], image.shape[0]))
+                image = np.array(cropped_img)
+                isotropic_scaling = True
+        
+        # random rotation
+        if np.random.uniform(low=0.0, high=1.0) < p:
+            image = Image.fromarray(image)
+            image = image.rotate(
+                np.random.uniform(low=0, high=360),
+                fillcolor=tuple(
+                    np.argmax(
+                        [np.bincount(x) for x in np.array(image).reshape(-1, 3).T],
+                        axis=1
+                        ).astype(np.uint8)
+                    )
+                )
+            image = np.array(image).astype(np.uint8)
+        # anisotropic scaling
+        # in my opinion, applying both isotropic and anisotropic scaling doesn't make sense
+        if (np.random.uniform(low=0.0, high=1.0) < p) and (not isotropic_scaling):
+            y_magnitude = np.clip(np.random.lognormal(0, (0.2*np.log(2))**2), a_min=0.05, a_max=1.0)
+            x_magnitude = np.clip(np.random.lognormal(0, (0.2*np.log(2))**2), a_min=0.05, a_max=1.0)
+            y_length = int(image.shape[0]*y_magnitude)
+            y_offset = np.random.randint(low=0, high=img.shape[0]-y_length) if (img.shape[0]-y_length > 0) else 0
+            x_length = int(image.shape[0]*x_magnitude)
+            x_offset = np.random.randint(low=0, high=img.shape[1]-x_length) if (img.shape[1]-x_length > 0) else 0
+            #print(y_length, x_length, x_offset, y_offset, x_offset+x_length, y_offset+y_length)
+            if (y_magnitude != 1.0) and (x_magnitude != 1.0):
+                cropped_img = image[y_offset:y_offset+y_length, x_offset:x_offset+x_length, :]
+                cropped_img = Image.fromarray(cropped_img)
+                cropped_img = cropped_img.resize((image.shape[1], image.shape[0]))
+                image = np.array(cropped_img)
+        image = image.astype(np.uint8)
+
+        # color transforms
+        # brightness
+        if np.random.uniform(low=0.0, high=1.0) < p:
+            magnitude = np.random.normal(0, 0.2**2, size=1)
+            hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+            hsv = hsv.astype(np.int32) + np.array([0, 0, int(magnitude*255)]).reshape((1, 1, 3))
+            hsv = np.clip(hsv, a_min=0, a_max=255).astype(np.uint8)
+            image = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+        # contrast
+        if np.random.uniform(low=0.0, high=1.0) < p:
+            magnitude = np.random.lognormal(1, (0.2*np.log(2))**2)
+            image = cv2.addWeighted(image.astype(np.uint8), magnitude, image, 0, 0)
+        # luma flip
+        if np.random.uniform(low=0.0, high=1.0) < p:
+            image = (((-1*((image/127.5)-1))+1)*127.5).astype(np.uint8)
+        # hue rotation
+        if np.random.uniform(low=0.0, high=1.0) < p:
+            magnitude = np.random.uniform(-127, 127)
+            hsv_img = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+            hsv_img = hsv_img.astype(np.int32) + np.array([int(magnitude), 0, 0]).reshape((1, 1, 3))
+            hsv_img[..., 0] = np.where(hsv_img[..., 0] > 255, hsv_img[..., 0]-255, hsv_img[..., 0])
+            hsv_img[..., 0] = np.where(hsv_img[..., 0] < 0, hsv_img[..., 0]+255, hsv_img[..., 0])
+            image = cv2.cvtColor(hsv_img.astype(np.uint8), cv2.COLOR_HSV2RGB)
+        # saturation
+        if np.random.uniform(low=0.0, high=1.0) < p:
+            magnitude = np.random.lognormal(0, np.log(2)**2)
+            hsv_img = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+            hsv_img[..., 1] = hsv_img[..., 1]*magnitude
+            hsv_img = np.clip(hsv_img, a_min=0, a_max=255)
+            image = cv2.cvtColor(hsv_img.astype(np.uint8), cv2.COLOR_HSV2RGB)
+        
+        return (image/127.5)-1.0
+
+
+
     ###############################
     ## All our training, etc
     ###############################               
 
-    def train(self, epochs):
+    def train(self, epochs, supplemental_img_dir=None, max_p=0.6, p_increment=0.05):
         card_generator = CardGenerator(
             img_dir=self.training_dir,
             batch_size=self.batch_size,
             n_cpu=self.n_cpu,
             img_dim=self.img_width
             )
-        img_generator = ImgGenerator(
-            img_dir='agglomerated_images',
-            batch_size=self.batch_size,
-            n_cpu=self.n_cpu,
-            img_dim=self.img_width
-            )
-        n_batches = card_generator.n_batches*2
+        batch_multiplier = 1
+        if supplemental_img_dir is not None:
+            img_generator = ImgGenerator(
+                img_dir=supplemental_img_dir,
+                batch_size=self.batch_size,
+                n_cpu=self.n_cpu,
+                img_dim=self.img_width
+                )
+            batch_multiplier = 2
+        n_batches = card_generator.n_batches*batch_multiplier
+        aug_p = 0.0
+        d_output_values = []
         for epoch in range(epochs):
             d_loss_accum = []
             g_loss_accum = []
 
             pbar = tqdm(total=n_batches)
             for batch_i in range(n_batches):
-                if batch_i % 2 == 0:
-                    real_batch, real_labels = card_generator.next()
-                else:
+                if (batch_i % 2 == 0:) and (supplemental_img_dir is not None):
                     real_batch, real_labels = img_generator.next()
+                else:
+                    real_batch, real_labels = card_generator.next()
+
+                d_outputs = self.discriminator.predict(real_batch)
+                d_output_values.extend(d_outputs)
+                if (batch_i % 4 == 0) and (batch_i > 0):
+                    d_sign = np.mean(d_output_values)
+                    if d_sign > 0:
+                        p += p_increment
+                    elif d_sign < 0:
+                        p -= p_increment
+                    p = np.clip(p, a_min=0.0, a_max=max_p)
+                    d_output_values = []
 
                 noise = np.random.normal(0, 1, size=(self.batch_size, self.z_len))
                 dummy = np.ones(shape=(self.batch_size,))
-
                 fake_batch = self.generator.predict([noise, real_labels])
-                
+                real_batch = np.stack([self.augmentation_pipeline(img) for img in real_batch])
+                fake_batch = np.stack([self.augmentation_pipeline(img) for img in fake_batch])
                 d_loss = self.discriminator_model.train_on_batch(
                     [real_batch, fake_batch, real_labels],
                     [dummy, dummy, dummy]
                     )
-                d_loss_accum.append(d_loss[0])
+                d_loss_accum.append(d_loss[1]+d_loss[2])
             
                 g_loss = self.generator_model.train_on_batch([noise, real_labels], dummy)
                 g_loss_accum.append(g_loss)

@@ -230,3 +230,23 @@ class EvolStyleGAN():
             )
         self.generator.save_weights(generator_savename)
         self.discriminator.save_weights(discriminator_savename)
+
+    def generate_samples(self, savedir, n_samples, batch_size=8, z_var=0.5):
+        if not os.path.isdir(savedir):
+            os.makedirs(savedir)
+        n_batches = n_samples//batch_size
+        pbar = tqdm(total=n_batches)
+        for i in range(n_batches):
+            noise_batch = np.random.normal(0, z_var, size=(batch_size, self.z_len))
+            class_batch = generate_labels(n_samples=n_samples, n_classes=self.n_classes, repeats=2)
+            predicted_imgs = self.generator.predict([noise_batch, class_batch])
+            predicted_imgs = [((img+1)*127.5).astype(np.uint8) for img in predicted_imgs]
+            for j, img in enumerate(predicted_imgs):
+                img_name = os.path.join(
+                    savedir,
+                    "{}_{}.png".format(i, j)
+                    )
+                img = Image.fromarray(img.astype(np.uint8))
+                img.save(img_name)
+            pbar.update()
+        pbar.close()
