@@ -3,6 +3,7 @@ import keras.backend as K
 from model.stylegan2 import StyleGAN2
 from model.evolstylegan import EvolStyleGAN
 import psutil
+import pickle
 
 N_CPU = psutil.cpu_count()
 print('Allocating {} Processes for data loading...'.format(N_CPU))
@@ -61,7 +62,7 @@ def parse_args():
     parser.add_argument(
         '--save_freq',
         type=int,
-        default=5
+        default=20
         )
     parser.add_argument(
         '--batch_size',
@@ -73,7 +74,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    gan = EvolStyleGAN(
+    gan = StyleGAN2(
         lr=args.lr,
         training_dir=args.training_dir,
         validation_dir=args.validation_dir,
@@ -85,15 +86,24 @@ def main():
         )
     if args.load_checkpoint:
         gan.generator.load_weights(
-            'logging/mtg_model_saves/stylegan2_generator_weights_430_2.277.h5',
+            'logging/model_saves/stylegan2_generator_weights_150_0.048.h5',
             by_name=True
             )
         gan.discriminator.load_weights(
-            'logging/mtg_model_saves/stylegan2_discriminator_weights_430_0.762.h5'
+            'logging/model_saves/stylegan2_discriminator_weights_150_0.426.h5',
             by_name=True
             )
         #gan.load_quality_estimator('logging/model_saves/koncept/bsz64_i1[224,224,3]_lMSE_o1[1]_best_weights.h5')
         print('Success - Model Checkpoints Loaded...')
+        gan.generator_model._make_train_function()
+        with open('logging/model_saves/stylegan2_generator_optimizer_state_150_0.048.pkl', 'rb') as f:
+            weight_values = pickle.load(f)
+        gan.generator_model.optimizer.set_weights(weight_values)
+        gan.discriminator_model._make_train_function()
+        with open('logging/model_saves/stylegan2_discriminator_optimizer_state_150_0.426.pkl', 'rb') as f:
+            weight_values = pickle.load(f)
+        gan.discriminator_model.optimizer.set_weights(weight_values)
+        print('Success - Model Optimizer States Loaded...')
 
     if args.train:
         gan.train(

@@ -8,6 +8,7 @@ from PIL import Image
 from keras.utils import plot_model
 from functools import partial
 from scipy import ndimage
+import pickle
 
 from keras.layers import BatchNormalization, Dense, Reshape, Lambda, Multiply, Add, Layer
 from keras.layers import Activation, UpSampling2D, AveragePooling2D, GlobalAveragePooling2D, Input
@@ -27,8 +28,6 @@ class StyleGAN2():
         img_width,
         img_height,
         img_depth,
-        z_len,
-        n_classes,
         lr,
         training_dir,
         validation_dir,
@@ -39,7 +38,7 @@ class StyleGAN2():
         self.img_width = img_width
         self.img_height = img_height
         self.img_depth = img_depth
-        self.z_len = z_len
+        self.z_len = 256
         self.n_noise_samples = n_noise_samples
         self.lr = lr
         self.training_dir = training_dir
@@ -51,7 +50,7 @@ class StyleGAN2():
                      self.testing_dir]:
             if not os.path.isdir(path):
                 os.makedirs(path)
-        self.n_classes = n_classes
+        self.n_classes = 5
         self.name = 'stylegan2'
         self.noise_samples = np.random.normal(0,0.8,size=(self.n_noise_samples, self.z_len))
         self.label_samples = label_generator(self.n_noise_samples)
@@ -232,8 +231,8 @@ class StyleGAN2():
             magnitude = np.clip(np.random.lognormal(0, (0.2*np.log(2))**2), a_min=0.05, a_max=1.0)
             x_y_length = int(image.shape[0]*magnitude)
             if x_y_length < image.shape[0]:
-                y_offset = np.random.randint(low=0, high=img.shape[0]-x_y_length) if (img.shape[0]-x_y_length > 0) else 0
-                x_offset = np.random.randint(low=0, high=img.shape[1]-x_y_length) if (img.shape[1]-x_y_length > 0) else 0
+                y_offset = np.random.randint(low=0, high=image.shape[0]-x_y_length) if (image.shape[0]-x_y_length > 0) else 0
+                x_offset = np.random.randint(low=0, high=image.shape[1]-x_y_length) if (image.shape[1]-x_y_length > 0) else 0
                 cropped_img = image[y_offset:y_offset+x_y_length, x_offset:x_offset+x_y_length, :]
                 cropped_img = Image.fromarray(cropped_img)
                 #print(x_y_length, y_offset, x_offset)
@@ -246,12 +245,13 @@ class StyleGAN2():
             image = Image.fromarray(image)
             image = image.rotate(
                 np.random.uniform(low=0, high=360),
-                fillcolor=tuple(
-                    np.argmax(
-                        [np.bincount(x) for x in np.array(image).reshape(-1, 3).T],
-                        axis=1
-                        ).astype(np.uint8)
-                    )
+                fillcolor=tuple(np.median(np.array(image), axis=(0, 1)).astype(np.uint8))
+                #fillcolor=tuple(
+                #    np.argmax(
+                #        [np.bincount(x) for x in np.array(image).reshape(-1, 3).T],
+                #        axis=1
+                #        ).astype(np.uint8)
+                #    )
                 )
             image = np.array(image).astype(np.uint8)
         # anisotropic scaling
@@ -260,9 +260,9 @@ class StyleGAN2():
             y_magnitude = np.clip(np.random.lognormal(0, (0.2*np.log(2))**2), a_min=0.05, a_max=1.0)
             x_magnitude = np.clip(np.random.lognormal(0, (0.2*np.log(2))**2), a_min=0.05, a_max=1.0)
             y_length = int(image.shape[0]*y_magnitude)
-            y_offset = np.random.randint(low=0, high=img.shape[0]-y_length) if (img.shape[0]-y_length > 0) else 0
+            y_offset = np.random.randint(low=0, high=image.shape[0]-y_length) if (image.shape[0]-y_length > 0) else 0
             x_length = int(image.shape[0]*x_magnitude)
-            x_offset = np.random.randint(low=0, high=img.shape[1]-x_length) if (img.shape[1]-x_length > 0) else 0
+            x_offset = np.random.randint(low=0, high=image.shape[1]-x_length) if (image.shape[1]-x_length > 0) else 0
             #print(y_length, x_length, x_offset, y_offset, x_offset+x_length, y_offset+y_length)
             if (y_magnitude != 1.0) and (x_magnitude != 1.0):
                 cropped_img = image[y_offset:y_offset+y_length, x_offset:x_offset+x_length, :]
@@ -310,19 +310,28 @@ class StyleGAN2():
     ## All our training, etc
     ###############################               
 
-    def train(self, epochs, supplemental_img_dir=None, max_p=0.6, p_increment=0.05):
+    def train(
+        self,
+        batch_size=16,
+        n_cpu=4,
+        epochs=1000,
+        supplemental_img_dir=None,
+        max_p=0.6,
+        p_increment=0.01,
+        save_freq=10
+        ):
         card_generator = CardGenerator(
             img_dir=self.training_dir,
-            batch_size=self.batch_size,
-            n_cpu=self.n_cpu,
+            batch_size=batch_size,
+            n_cpu=n_cpu,
             img_dim=self.img_width
             )
         batch_multiplier = 1
         if supplemental_img_dir is not None:
             img_generator = ImgGenerator(
                 img_dir=supplemental_img_dir,
-                batch_size=self.batch_size,
-                n_cpu=self.n_cpu,
+                batch_size=batch_size,
+                n_cpu=n_cpu,
                 img_dim=self.img_width
                 )
             batch_multiplier = 2
@@ -333,29 +342,30 @@ class StyleGAN2():
             d_loss_accum = []
             g_loss_accum = []
 
-            pbar = tqdm(total=n_batches)
+            pbar = tqdm(total=n_batches, desc='g_loss: 0.0000, d_loss: 0.0000, aug_p: 0.0000, d_sign: 0.0000')
             for batch_i in range(n_batches):
-                if (batch_i % 2 == 0:) and (supplemental_img_dir is not None):
+                if (batch_i % 2 == 0) and (supplemental_img_dir is not None):
                     real_batch, real_labels = img_generator.next()
                 else:
                     real_batch, real_labels = card_generator.next()
 
-                d_outputs = self.discriminator.predict(real_batch)
+                d_outputs = self.discriminator.predict([real_batch, real_labels])
                 d_output_values.extend(d_outputs)
                 if (batch_i % 4 == 0) and (batch_i > 0):
-                    d_sign = np.mean(d_output_values)
+                    d_sign = np.mean(np.where(np.array(d_output_values)>0, 1, -1))
                     if d_sign > 0:
-                        p += p_increment
+                        aug_p += p_increment
                     elif d_sign < 0:
-                        p -= p_increment
-                    p = np.clip(p, a_min=0.0, a_max=max_p)
+                        aug_p -= p_increment
+                    aug_p = np.clip(aug_p, a_min=0.0, a_max=max_p)
                     d_output_values = []
 
-                noise = np.random.normal(0, 1, size=(self.batch_size, self.z_len))
-                dummy = np.ones(shape=(self.batch_size,))
+                noise = np.random.normal(0, 1, size=(batch_size, self.z_len))
+                dummy = np.ones(shape=(batch_size,))
                 fake_batch = self.generator.predict([noise, real_labels])
-                real_batch = np.stack([self.augmentation_pipeline(img) for img in real_batch])
-                fake_batch = np.stack([self.augmentation_pipeline(img) for img in fake_batch])
+                if aug_p != 0.0:
+                    real_batch = np.stack([self.augmentation_pipeline(img, aug_p) for img in real_batch])
+                    fake_batch = np.stack([self.augmentation_pipeline(img, aug_p) for img in fake_batch])
                 d_loss = self.discriminator_model.train_on_batch(
                     [real_batch, fake_batch, real_labels],
                     [dummy, dummy, dummy]
@@ -367,16 +377,27 @@ class StyleGAN2():
                 
 
                 pbar.update()
+                pbar.set_description(
+                    'g_loss: {.4f}, d_loss: {.4f}, aug_p: {.4f}, d_sign: {.4f}'.format(
+                        np.mean(d_loss_accum), 
+                        np.mean(g_loss_accum),
+                        aug_p,
+                        np.mean(np.where(np.array(d_output_values)>0, 1, -1)),
+                        ),
+                    refresh=True
+                    )
             pbar.close()
 
-            print('{}/{} ----> d_loss: {}, g_loss: {}'.format(
-                epoch, 
-                epochs, 
-                np.mean(d_loss_accum), 
-                np.mean(g_loss_accum)
-                ))
+            print(f"{epoch}/{epochs}")
+            #print('{}/{} ----> d_loss: {}, g_loss: {}, augmentation_p: {}'.format(
+            #    epoch, 
+            #    epochs, 
+            #    np.mean(d_loss_accum), 
+            #    np.mean(g_loss_accum),
+            #    aug_p
+            #    ))
 
-            if epoch % self.save_freq == 0:
+            if epoch % save_freq == 0:
                 self.noise_validation(epoch)
                 self.save_model_weights(epoch, np.mean(d_loss_accum), np.mean(g_loss_accum))
 
@@ -419,5 +440,18 @@ class StyleGAN2():
             self.checkpoint_dir,
             '{}_discriminator_weights_{}_{:.3f}.h5'.format(self.name, epoch, d_loss)
             )
+        d_optimizer_savename = os.path.join(
+            self.checkpoint_dir,
+            '{}_discriminator_optimizer_state_{}_{:.3f}.pkl'.format(self.name, epoch, d_loss)
+            )
+        g_optimizer_savename = os.path.join(
+            self.checkpoint_dir,
+            '{}_generator_optimizer_state_{}_{:.3f}.pkl'.format(self.name, epoch, g_loss)
+            )
+        for savename, model in zip([g_optimizer_savename, d_optimizer_savename], [self.generator_model, self.discriminator_model]):
+            symbolic_weights = getattr(model.optimizer, 'weights')
+            weight_values = K.batch_get_value(symbolic_weights)
+            with open(savename, 'wb') as f:
+                pickle.dump(weight_values, f)
         self.generator.save_weights(generator_savename)
         self.discriminator.save_weights(discriminator_savename)
